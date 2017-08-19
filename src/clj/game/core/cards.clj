@@ -1,7 +1,7 @@
 (in-ns 'game.core)
 
 (declare active? all-installed cards card-init deactivate card-flag? get-card-hosted handle-end-run has-subtype? ice?
-         make-eid register-events remove-from-host remove-icon rezzed? trash trigger-event update-hosted!
+         make-eid register-events remove-from-host remove-icon reset-card rezzed? trash trigger-event update-hosted!
          update-ice-strength unregister-events)
 
 ;;; Functions for loading card information.
@@ -58,7 +58,7 @@
 (defn move
   "Moves the given card to the given new zone."
   ([state side card to] (move state side card to nil))
-  ([state side {:keys [zone cid host installed] :as card} to {:keys [front keep-server-alive] :as options}]
+  ([state side {:keys [zone cid host installed] :as card} to {:keys [front keep-server-alive force] :as options}]
    (let [zone (if host (map to-keyword (:zone host)) zone)
          src-zone (first zone)
          target-zone (if (vector? to) (first to) to)
@@ -66,12 +66,14 @@
      (when (and card (or host
                          (some #(when (= cid (:cid %)) %) (get-in @state (cons :runner (vec zone))))
                          (some #(when (= cid (:cid %)) %) (get-in @state (cons :corp (vec zone)))))
-                (not (seq (get-in @state [side :locked zone]))))
+                (or (empty? (get-in @state [side :locked (-> card :zone first)]))
+                    force))
+       (trigger-event state side :pre-card-moved card src-zone target-zone)
        (let [dest (if (sequential? to) (vec to) [to])
              trash-hosted (fn [h]
                              (trash state side
-                               (dissoc (update-in h [:zone] #(map to-keyword %)) :facedown)
-                               {:unpreventable true})
+                                    (update-in h [:zone] #(map to-keyword %))
+                                    {:unpreventable true :suppress-event true})
                                ())
              update-hosted (fn [h]
                              (let [newz (flatten (list (if (vector? to) to [to])))
@@ -118,6 +120,7 @@
          (when-let [card-moved (:move-zone (card-def c))]
            (card-moved state side (make-eid state) moved-card card))
          (trigger-event state side :card-moved card moved-card)
+         (when (#{:discard :hand} to) (reset-card state side moved-card))
          (when-let [icon-card (get-in moved-card [:icon :card])]
            ;; remove icon if card moved to :discard or :hand
            (when (#{:discard :hand} to) (remove-icon state side icon-card moved-card)))
@@ -172,7 +175,8 @@
 (defn shuffle!
   "Shuffles the vector in @state [side kw]."
   [state side kw]
-  (swap! state update-in [side kw] shuffle))
+  (when-completed (trigger-event-sync state side (keyword (str (name side) "-shuffle-deck")))
+                  (swap! state update-in [side kw] shuffle)))
 
 (defn shuffle-into-deck
   [state side & args]
@@ -232,4 +236,3 @@
       (update! state side c)
       (when (active? card)
         (card-init state side c false)))))
-

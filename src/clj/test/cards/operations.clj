@@ -107,6 +107,50 @@
       (prompt-select :corp (refresh co))
       (is (= 15 (:credit (get-corp))) "Corp gained 6 credits for Back Channels"))))
 
+(deftest accelerated-diagnostics-with-current
+  ;; Accelerated Diagnostics - Interaction with Current
+  (do-game
+    (new-game (default-corp [(qty "Accelerated Diagnostics" 1) (qty "Cerebral Overwriter" 1)
+                             (qty "Enhanced Login Protocol" 1) (qty "Shipment from SanSan" 1)
+                             (qty "Hedge Fund" 1)])
+              (default-runner))
+    (starting-hand state :corp ["Accelerated Diagnostics" "Cerebral Overwriter"])
+    (play-from-hand state :corp "Cerebral Overwriter" "New remote")
+    (core/gain state :corp :credit 3)
+    (play-from-hand state :corp "Accelerated Diagnostics")
+
+    (let [playarea (get-in @state [:corp :play-area])
+          hf (find-card "Hedge Fund" playarea)
+          ss (find-card "Shipment from SanSan" playarea)
+          elp (find-card "Enhanced Login Protocol" playarea)
+          co (get-content state :remote1 0)]
+      (is (= 3 (count playarea)) "3 cards in play area")
+      (prompt-select :corp elp)
+      (is (= "Enhanced Login Protocol" (:title (first (get-in @state [:corp :current]))))
+        "Enhanced Login Protocol active in Current area")
+      (prompt-select :corp ss)
+      (prompt-choice :corp "2")
+      (prompt-select :corp co)
+      (is (= 2 (:advance-counter (refresh co))) "Cerebral Overwriter gained 2 advancements")
+      (prompt-select :corp hf)
+      (is (= 9 (:credit (get-corp))) "Corp gained credits from Hedge Fund"))))
+
+(deftest an-offer-you-cant-refuse
+  ;; An Offer You Can't Refuse - exact card added to score area, not the last discarded one
+  (do-game
+    (new-game (default-corp [(qty "Celebrity Gift" 1) (qty "An Offer You Can't Refuse" 1)])
+              (default-runner))
+    (play-from-hand state :corp "An Offer You Can't Refuse")
+    (prompt-choice :corp "R&D")
+    (core/move state :corp (find-card "Celebrity Gift" (:hand (get-corp))) :discard)
+    (is (= 2 (count (:discard (get-corp)))))
+    (prompt-choice :runner "No")
+    (is (= 1 (:agenda-point (get-corp))) "An Offer the Runner refused")
+    (is (= 1 (count (:scored (get-corp)))))
+    (is (find-card "An Offer You Can't Refuse" (:scored (get-corp))))
+    (is (= 1 (count (:discard (get-corp)))))
+    (is (find-card "Celebrity Gift" (:discard (get-corp))))))
+
 (deftest big-brother
   ;; Big Brother - Give the Runner 2 tags if already tagged
   (do-game
@@ -167,6 +211,44 @@
           (prompt-select :runner oak)
           (prompt-choice :runner "Steal")
           (is (= 2 (:tag (get-runner))) "Runner took 2 tags from accessing agenda with Casting Call hosted on it"))))))
+
+(deftest cerebral-cast-runner-wins
+  ;; Cerebral Cast: if the runner succefully ran last turn, psi game to give runner choice of tag or BD
+  (do-game
+    (new-game (default-corp [(qty "Cerebral Cast" 1)])
+              (default-runner))
+	    (play-from-hand state :corp "Cerebral Cast")
+	    (is (= 3 (:click (get-corp))) "Cerebral Cast precondition not met; card not played")
+	    (take-credits state :corp)
+	    (run-empty-server state "Archives")
+	    (take-credits state :runner)
+	    (play-from-hand state :corp "Cerebral Cast")
+        (prompt-choice :corp "0 [Credits]")
+        (prompt-choice :runner "0 [Credits]")
+	    (is (= 0 (count (:discard (get-runner)))) "Runner took no damage")
+		(is (= 0 (:tag (get-runner))) "Runner took no tags")))
+
+(deftest cerebral-cast-corp-wins
+  ;; Cerebral Cast: if the runner succefully ran last turn, psi game to give runner choice of tag or BD
+  (do-game
+    (new-game (default-corp [(qty "Cerebral Cast" 2)])
+              (default-runner))
+	    (take-credits state :corp)
+	    (run-empty-server state "Archives")
+	    (take-credits state :runner)
+	    (play-from-hand state :corp "Cerebral Cast")
+        (prompt-choice :corp "0 [Credits]")
+        (prompt-choice :runner "1 [Credits]")
+		(prompt-choice :runner "1 brain damage")
+	    (is (= 1 (count (:discard (get-runner)))) "Runner took a brain damage")
+		(is (= 0 (:tag (get-runner))) "Runner took no tags from brain damage choice")
+	    (play-from-hand state :corp "Cerebral Cast")
+        (prompt-choice :corp "0 [Credits]")
+        (prompt-choice :runner "1 [Credits]")
+		(prompt-choice :runner "1 tag")
+	    (is (= 1 (count (:discard (get-runner)))) "Runner took no additional damage")
+		(is (= 1 (:tag (get-runner))) "Runner took a tag from Cerebral Cast choice")))		
+
 
 (deftest cerebral-static-chaos-theory
   ;; Cerebral Static - vs Chaos Theory
@@ -274,78 +356,156 @@
     (is (= 7 (:credit (get-corp))) "Ignored remote with ICE but no server contents")))
 
 (deftest enhanced-login-protocol
-  ;; Enhanced Login Protocol - tests interaction with run events, interaction with runs, and inability to run last click
+  ;; Enhanced Login Protocol - First click run each turn costs an additional click
   (do-game
     (new-game (default-corp [(qty "Enhanced Login Protocol" 1)])
-              (default-runner [(qty "Dirty Laundry" 1)]))
+              (default-runner [(qty "Employee Strike" 1)]))
     (play-from-hand state :corp "Enhanced Login Protocol")
     (take-credits state :corp)
-    (is (= 4 (:click (get-runner))) "Runner starts turn with 4 clicks")
-    (play-from-hand state :runner "Dirty Laundry")
-    (prompt-choice :runner "Archives")
+
+    (is (= 4 (:click (get-runner))) "Runner has 4 clicks")
+    (run-on state :archives)
+    (is (= 2 (:click (get-runner)))
+        "Runner spends 1 additional click to make the first run")
     (run-successful state)
-    (is (= 3 (:click (get-runner))) "Run event only takes 1 click")
-    (run-on state :hq)
-    (run-jack-out state)
-    (is (= 1 (:click (get-runner))) "first non-event run takes 2 clicks")
-    (take-credits state :runner)
-    (take-credits state :corp)
-    (is (= 4 (:click (get-runner))) "Runner starts turn with 4 clicks")
-    (run-on state :hq)
-    (run-jack-out state)
-    (is (= 2 (:click (get-runner))) "first run takes 2 clicks")
-    (run-on state :hq)
-    (is (= 1 (:click (get-runner))) "second run takes 1 click")
-    (run-jack-out state)
-    (take-credits state :runner)
-    (take-credits state :corp)
-    (take-credits state :runner 2)
-    (is (= 2 (:click (get-runner))))
-    (is (core/can-run-server? state "HQ") "Runner can run - two clicks")
-    (take-credits state :runner 1)
-    (is (= 1 (:click (get-runner))))
-    (run-on state :hq)
-    (is (not (:run @state)) "No run initiated - not enough clicks")
-    (is (= 1 (:click (get-runner))) "Runner still has last click")))
 
-(deftest enhanced-login-protocol-keyhole
-  ;; Enhanced Login Protocol - tests interaction with runs initiated from programs
+    (run-on state :archives)
+    (is (= 1 (:click (get-runner)))
+        "Runner doesn't spend 1 additional click to make the second run")
+    (run-successful state)
+
+    (take-credits state :runner)
+    (take-credits state :corp)
+    (take-credits state :runner 3)
+
+    (is (= 1 (:click (get-runner))) "Runner has 1 click")
+    (run-on state :archives)
+    (is (not (:run @state)) "No run was initiated")
+    (is (= 1 (:click (get-runner))) "Runner has 1 click")
+
+    (take-credits state :runner)
+    (take-credits state :corp)
+
+    (play-from-hand state :runner "Employee Strike")
+
+    (is (= 3 (:click (get-runner))) "Runner has 3 clicks")
+    (run-on state :archives)
+    (is (= 2 (:click (get-runner)))
+        "Runner doesn't spend 1 additional click to make a run")))
+
+(deftest enhanced-login-protocol-card-ability
+  ;; Enhanced Login Protocol - Card ability runs don't cost additional clicks
   (do-game
     (new-game (default-corp [(qty "Enhanced Login Protocol" 1)])
-              (default-runner [(qty "Keyhole" 1)]))
+              (default-runner [(qty "Sneakdoor Beta" 1)]))
     (play-from-hand state :corp "Enhanced Login Protocol")
     (take-credits state :corp)
-    (play-from-hand state :runner "Keyhole")
-    (is (= 3 (:click (get-runner))) "Runner has 3 clicks before run")
-    (let [keyhole (get-in @state [:runner :rig :program 0])]
-      (card-ability state :runner keyhole 0)
-      (is (= 2 (:click (get-runner))) "Runner has 2 clicks after using keyhole"))))
-
-(deftest enhanced-login-protocol-sol
-  ;; Enhanced Login Protocol - tests interaction with ELP played on runners turn
-  (do-game
-    (new-game
-      (make-deck "New Angeles Sol: Your News" [(qty "Enhanced Login Protocol" 1) (qty "Breaking News" 1)])
-      (default-runner))
-    (play-from-hand state :corp "Breaking News" "New remote")
+    (play-from-hand state :runner "Sneakdoor Beta")
+    (take-credits state :runner)
     (take-credits state :corp)
-    (run-empty-server state :remote1)
+
+    (is (= 4 (:click (get-runner))) "Runner has 2 clicks")
+    (let [sneakdoor (get-in @state [:runner :rig :program 0])]
+      (card-ability state :runner sneakdoor 0)
+      (is (= 3 (:click (get-runner)))
+          "Runner doesn't spend 1 additional click to run with a card ability")
+      (run-successful state)
+
+      (run-on state :archives)
+      (is (= 1 (:click (get-runner)))
+          "Runner spends 1 additional click to make a run")
+      (run-successful state)
+
+      (take-credits state :runner)
+      (take-credits state :corp)
+
+      (is (= 4 (:click (get-runner))) "Runner has 4 clicks")
+      (run-on state :archives)
+      (is (= 2 (:click (get-runner)))
+          "Runner spends 1 additional click to make a run"))))
+
+(deftest enhanced-login-protocol-run-events
+  ;; Enhanced Login Protocol - Run event don't cost additional clicks
+  (do-game
+    (new-game (default-corp [(qty "Enhanced Login Protocol" 1)])
+              (default-runner [(qty "Out of the Ashes" 1)]))
+    (play-from-hand state :corp "Enhanced Login Protocol")
+    (take-credits state :corp)
+
+    (is (= 4 (:click (get-runner))) "Runner has 4 clicks")
+    (play-from-hand state :runner "Out of the Ashes")
+    (prompt-choice :runner "Archives")
+    (is (= 3 (:click (get-runner)))
+        "Runner doesn't spend 1 additional click to run with a run event")
+    (run-successful state)
+
+    (run-on state :archives)
+    (is (= 1 (:click (get-runner)))
+        "Runner spends 1 additional click to make a run")
+    (run-successful state)
+
+    (take-credits state :runner)
+    (take-credits state :corp)
+    (prompt-choice :runner "No") ; Out of the Ashes prompt
+
+    (is (= 4 (:click (get-runner))) "Runner has 4 clicks")
+    (run-on state :archives)
+    (is (= 2 (:click (get-runner)))
+        "Runner spends 1 additional click to make a run")))
+
+(deftest enhanced-login-protocol-runner-turn-first-run
+  ;; Enhanced Login Protocol - Works when played on the runner's turn
+  (do-game
+    (new-game (make-deck "New Angeles Sol: Your News"
+                         [(qty "Enhanced Login Protocol" 1)
+                          (qty "Breaking News" 1)])
+              (default-runner [(qty "Hades Shard" 1)]))
+    (trash-from-hand state :corp "Breaking News")
+    (take-credits state :corp)
+
+    (core/gain state :runner :credit 2)
+    (play-from-hand state :runner "Hades Shard")
+    (card-ability state :runner (get-in @state [:runner :rig :resource 0]) 0)
     (prompt-choice :runner "Steal")
     (prompt-choice :corp "Yes")
-    (prompt-select :corp (find-card "Enhanced Login Protocol" (:hand (get-corp))))
-    (is (not (:run @state)) "Run ended")
-    (is (find-card "Enhanced Login Protocol" (:current (get-corp))) "ELP in play")
-    (is (= 3 (:click (get-runner))) "runner has 3 clicks when ELP is in play")
-    (run-on state :hq)
-    (run-jack-out state)
-    (is (= 1 (:click (get-runner))) "first non-event run takes 2 clicks")
-    (take-credits state :runner)
-    (take-credits state :corp)
-    (is (= 4 (:click (get-runner))) "runner has 4 clicks on start of turn")
-    (run-on state :hq)
-    (run-jack-out state)
-    (is (= 2 (:click (get-runner))) "ELP still works correctly")))
+    (prompt-select :corp (find-card "Enhanced Login Protocol"
+                                    (:hand (get-corp))))
+    (is (find-card "Enhanced Login Protocol" (:current (get-corp)))
+        "Enhanced Login Protocol is in play")
 
+    (is (= 3 (:click (get-runner))) "Runner has 3 clicks")
+    (run-on state :archives)
+    (is (= 1 (:click (get-runner)))
+        "Runner spends 1 additional click to make a run")))
+
+(deftest enhanced-login-protocol-runner-turn-second-run
+  ;; Enhanced Login Protocol - Doesn't fire if already run when played on the runner's turn
+  (do-game
+    (new-game (make-deck "New Angeles Sol: Your News"
+                         [(qty "Enhanced Login Protocol" 1)
+                          (qty "Breaking News" 1)])
+              (default-runner [(qty "Hades Shard" 1)]))
+    (trash-from-hand state :corp "Breaking News")
+    (take-credits state :corp)
+
+    (run-on state :hq)
+    (run-successful state)
+    (prompt-choice :runner "OK")
+
+    (core/gain state :runner :credit 2)
+    (play-from-hand state :runner "Hades Shard")
+    (card-ability state :runner (get-in @state [:runner :rig :resource 0]) 0)
+    (prompt-choice :runner "Steal")
+    (prompt-choice :corp "Yes")
+    (prompt-select :corp (find-card "Enhanced Login Protocol"
+                                    (:hand (get-corp))))
+    (is (find-card "Enhanced Login Protocol" (:current (get-corp)))
+        "Enhanced Login Protocol is in play")
+
+    (is (= 2 (:click (get-runner))) "Runner has 2 clicks")
+    (run-on state :archives)
+    (is (= 1 (:click (get-runner)))
+        "Runner doesn't spend 1 additional click to make a run")))
 
 (deftest exchange-of-information
   ;; Exchange of Information - Swapping agendas works correctly
@@ -561,6 +721,32 @@
     (prompt-choice :corp 0) ; default trace
     (prompt-choice :runner 2) ; Runner matches
     (is (= 1 (:bad-publicity (get-corp))))))
+	
+(deftest ipo-terminal
+  ;; IPO - credits with Terminal operations
+  (do-game
+    (new-game
+      (default-corp [(qty "IPO" 1)])
+      (default-runner))
+    (take-credits state :corp)
+    (take-credits state :runner)
+    (play-from-hand state :corp "IPO")
+	(is (= 13 (:credit (get-corp))))
+	(is (= 0 (:click (get-corp))) "Terminal ends turns")))	
+
+(deftest lag-time
+  (do-game
+    (new-game (default-corp [(qty "Lag Time" 1) (qty "Vanilla" 1) (qty "Lotus Field" 1)])
+              (default-runner))
+    (take-credits state :corp)
+    (take-credits state :runner)
+    (play-from-hand state :corp "Vanilla" "HQ")
+    (play-from-hand state :corp "Lotus Field" "R&D")
+    (play-from-hand state :corp "Lag Time")
+    (core/rez state :corp (get-ice state :hq 0))
+    (core/rez state :corp (get-ice state :rd 0))
+    (is (= 1 (:current-strength (get-ice state :hq 0))) "Vanilla at 1 strength")
+	(is (= 5 (:current-strength (get-ice state :rd 0))) "Lotus Field at 5 strength")))
 
 (deftest lateral-growth
   (do-game
@@ -573,6 +759,23 @@
     (is (= "Breaking News" (:title (get-content state :remote1 0)))
       "Breaking News installed by Lateral Growth")
     (is (= 7 (:credit (get-corp))))))
+	
+(deftest mass-commercialization
+  ;; Mass Commercialization
+  (do-game
+    (new-game (default-corp [(qty "Mass Commercialization" 1)
+                             (qty "Ice Wall" 3)])
+              (default-runner))
+    (play-from-hand state :corp "Ice Wall" "HQ")
+    (play-from-hand state :corp "Ice Wall" "R&D")
+    (play-from-hand state :corp "Ice Wall" "Archives")
+    (take-credits state :runner)
+    (core/advance state :corp {:card (refresh (get-ice state :hq 0))})
+    (core/advance state :corp {:card (refresh (get-ice state :archives 0))})
+    (core/advance state :corp {:card (refresh (get-ice state :rd 0))})
+    (take-credits state :runner)
+    (play-from-hand state :corp "Mass Commercialization")
+    (is (= 8 (:credit (get-corp))) "Gained 6 for 3 advanced ice from Mass Commercialization")))
 
 (deftest manhunt-every-run
   ;; Manhunt - only fires once per turn. Unreported issue.
@@ -790,6 +993,41 @@
       (is (= 1 (:credit (get-corp))) "Spent 4 credits")
       (is (= 4 (:advance-counter (refresh pj))) "Junebug has 4 advancements"))))
 
+(deftest psychokinesis
+  ;; Pyschokinesis - Terminal Event (end the turn); Look at R&D, install an Asset, Agenda, or Upgrade in a Remote Server
+  (do-game
+    (new-game (default-corp [(qty "Psychokinesis" 3) (qty "Caprice Nisei" 1) (qty "Adonis Campaign" 1) 
+                              (qty "Global Food Initiative" 1)])
+              (default-runner))
+    (starting-hand state :corp ["Psychokinesis","Psychokinesis","Psychokinesis"])
+    ;; Test installing an Upgrade
+    (play-from-hand state :corp "Psychokinesis")
+    (prompt-choice :corp (find-card "Caprice Nisei" (:deck (get-corp))))
+    (prompt-choice :corp "New remote")
+    (is (= "Caprice Nisei" (:title (get-content state :remote1 0)))
+      "Caprice Nisei installed by Psychokinesis")
+    ;; Test installing an Asset
+    (core/gain state :corp :click 1)
+    (play-from-hand state :corp "Psychokinesis")
+    (prompt-choice :corp (find-card "Adonis Campaign" (:deck (get-corp))))
+    (prompt-choice :corp "New remote")
+    (is (= "Adonis Campaign" (:title (get-content state :remote2 0)))
+      "Adonis Campaign installed by Psychokinesis")
+    ;; Test installing an Agenda
+    (core/gain state :corp :click 1)
+    (play-from-hand state :corp "Psychokinesis")
+    (prompt-choice :corp (find-card "Global Food Initiative" (:deck (get-corp))))
+    (prompt-choice :corp "New remote")
+    (is (= "Global Food Initiative" (:title (get-content state :remote3 0)))
+      "Global Food Initiative installed by Psychokinesis")
+    ;; Test selecting "None"
+    (core/gain state :corp :click 1)
+    (core/move state :corp (find-card "Psychokinesis" (:discard (get-corp))) :hand)
+    (play-from-hand state :corp "Psychokinesis")
+    (prompt-choice :corp "None")
+    (is (= nil (:title (get-content state :remote4 0)))
+      "Nothing is installed by Psychokinesis")))
+
 (deftest punitive-counterstrike
   ;; Punitive Counterstrike - deal meat damage equal to printed agenda points
   (do-game
@@ -1004,6 +1242,56 @@
     (is (= 4 (:click (get-runner))) "Runner has 4 clicks")
     (is (= 1 (:credit (get-runner))) "Runner has 1 credit")))
 
+(deftest service-outage-runner-turn-first-run
+  ;; Service Outage - Works when played on the runner's turn
+  (do-game
+    (new-game (make-deck "New Angeles Sol: Your News" [(qty "Service Outage" 1)
+                                                       (qty "Breaking News" 1)])
+              (default-runner [(qty "Hades Shard" 1)]))
+    (trash-from-hand state :corp "Breaking News")
+    (take-credits state :corp)
+
+    (core/gain state :runner :credit 3)
+    (play-from-hand state :runner "Hades Shard")
+    (card-ability state :runner (get-in @state [:runner :rig :resource 0]) 0)
+    (prompt-choice :runner "Steal")
+    (prompt-choice :corp "Yes")
+    (prompt-select :corp (find-card "Service Outage" (:hand (get-corp))))
+    (is (find-card "Service Outage" (:current (get-corp)))
+        "Service Outage is in play")
+
+    (is (= 1 (:credit (get-runner))) "Runner has 1 credit")
+    (run-on state :archives)
+    (is (= 0 (:credit (get-runner)))
+        "Runner spends 1 additional credit to make a run")))
+
+(deftest service-outage-runner-turn-second-run
+  ;; Service Outage - Doesn't fire if already run when played on the runner's turn
+  (do-game
+    (new-game (make-deck "New Angeles Sol: Your News" [(qty "Service Outage" 1)
+                                                       (qty "Breaking News" 1)])
+              (default-runner [(qty "Hades Shard" 1)]))
+    (trash-from-hand state :corp "Breaking News")
+    (take-credits state :corp)
+
+    (run-on state :hq)
+    (run-successful state)
+    (prompt-choice :runner "OK")
+
+    (core/gain state :runner :credit 3)
+    (play-from-hand state :runner "Hades Shard")
+    (card-ability state :runner (get-in @state [:runner :rig :resource 0]) 0)
+    (prompt-choice :runner "Steal")
+    (prompt-choice :corp "Yes")
+    (prompt-select :corp (find-card "Service Outage" (:hand (get-corp))))
+    (is (find-card "Service Outage" (:current (get-corp)))
+        "Service Outage is in play")
+
+    (is (= 1 (:credit (get-runner))) "Runner has 1 credit")
+    (run-on state :archives)
+    (is (= 1 (:credit (get-runner)))
+        "Runner doesn't spend 1 additional credit to make a run")))
+
 (deftest shipment-from-sansan
   ;; Shipment from SanSan - placing advancements
   (do-game
@@ -1173,6 +1461,48 @@
     (is (= 2 (count (:hand (get-corp)))) "Both Subliminals returned to HQ")
     (is (= 0 (count (:discard (get-corp)))) "No Subliminals in Archives")))
 
+(deftest success-bad-publicity
+  ;; Success - Works with bad publicity
+  (do-game
+    (new-game (default-corp [(qty "NAPD Contract" 1) (qty "Project Beale" 1) (qty "Success" 1)])
+              (default-runner))
+    (play-from-hand state :corp "NAPD Contract" "New remote")
+    (play-from-hand state :corp "Project Beale" "New remote")
+    (core/gain state :corp :bad-publicity 9)
+    (core/gain state :corp :credit 8)
+    (core/gain state :corp :click 15)
+    (let [napd (get-content state :remote1 0)
+          beale (get-content state :remote2 0)]
+      (dotimes [_ 13] (core/advance state :corp {:card (refresh napd)}))
+      (is (= 13 (:advance-counter (refresh napd))))
+      (core/score state :corp {:card (refresh napd)})
+      (is (= 2 (:agenda-point (get-corp))))
+      (play-from-hand state :corp "Success")
+      (is (= "NAPD Contract" (:title (first (:rfg (get-corp))))))
+      (prompt-select :corp (refresh beale))
+      (is (= 13 (:advance-counter (refresh beale))))
+      (core/score state :corp {:card (refresh beale)})
+      (is (= 7 (:agenda-point (get-corp)))))))
+
+(deftest success-public-agenda
+  ;; Success - Works with public agendas
+  (do-game
+    (new-game (default-corp [(qty "Oaktown Renovation" 1) (qty "Vanity Project" 1) (qty "Success" 1)])
+              (default-runner))
+    (core/gain state :corp :click 1)
+    (score-agenda state :corp (find-card "Vanity Project" (:hand (get-corp))))
+    (is (= 4 (:agenda-point (get-corp))))
+    (play-from-hand state :corp "Oaktown Renovation" "New remote")
+    (is (= 5 (:credit (get-corp))))
+    (play-from-hand state :corp "Success")
+    (is (= "Vanity Project" (:title (first (:rfg (get-corp))))))
+    (let [oaktown (get-content state :remote1 0)]
+      (prompt-select :corp (refresh oaktown))
+      (is (= 6 (:advance-counter (refresh oaktown))))
+      (is (= 19 (:credit (get-corp))) "Gain 2 + 2 + 2 + 2 + 3 + 3 = 14 credits for advancing Oaktown")
+      (core/score state :corp {:card (refresh oaktown)})
+      (is (= 2 (:agenda-point (get-corp)))))))
+
 (deftest successful-demonstration
   ;; Successful Demonstration - Play if only Runner made unsuccessful run last turn; gain 7 credits
   (do-game
@@ -1189,6 +1519,42 @@
     (play-from-hand state :corp "Successful Demonstration")
     (is (= 13 (:credit (get-corp))) "Paid 2 to play event; gained 7 credits")))
 
+(deftest transparency-initiative
+  ;; Transparency Initiative - Full test
+  (do-game
+    (new-game (default-corp [(qty "Transparency Initiative" 1) (qty "Oaktown Renovation" 1)
+                             (qty "Project Atlas" 1) (qty "Hostile Takeover" 1) (qty "Casting Call" 1)])
+              (default-runner))
+    (core/gain state :corp :click 5)
+    (play-from-hand state :corp "Oaktown Renovation" "New remote")
+    (play-from-hand state :corp "Casting Call")
+    (prompt-select :corp (find-card "Project Atlas" (:hand (get-corp))))
+    (prompt-choice :corp "New remote")
+    (play-from-hand state :corp "Hostile Takeover" "New remote")
+    (let [oaktown (get-content state :remote1 0)
+          atlas (get-content state :remote2 0)
+          hostile (get-content state :remote3 0)]
+      (play-from-hand state :corp "Transparency Initiative")
+      (prompt-select :corp (refresh oaktown))
+      ;; doesn't work on face-up agendas
+      (is (= 0 (count (:hosted (refresh oaktown)))))
+      (prompt-select :corp (refresh atlas))
+      (is (= 1 (count (:hosted (refresh atlas)))) "Casting Call")
+      ;; works on facedown agenda
+      (prompt-select :corp (refresh hostile))
+      (is (= 1 (count (:hosted (refresh hostile)))))
+      ;; gains Public subtype
+      (is (core/has-subtype? (refresh hostile) "Public"))
+      ;; gain 1 credit when advancing
+      (is (= 5 (:credit (get-corp))))
+      (core/advance state :corp {:card (refresh hostile)})
+      (is (= 5 (:credit (get-corp))))
+      ;; make sure advancing other agendas doesn't gain 1
+      (core/advance state :corp {:card (refresh oaktown)})
+      (is (= 6 (:credit (get-corp))) "Transparency initiative didn't fire")
+      (core/advance state :corp {:card (refresh atlas)})
+      (is (= 5 (:credit (get-corp))) "Transparency initiative didn't fire"))))
+
 (deftest wetwork-refit
   ;; Wetwork Refit - Only works on bioroid ice and adds a subroutine
   (do-game
@@ -1196,12 +1562,14 @@
                              (qty "Vanilla" 1)
                              (qty "Wetwork Refit" 3)])
               (default-runner))
+    (core/gain state :corp :credit 20)
+    (core/gain state :corp :click 10)
     (play-from-hand state :corp "Eli 1.0" "R&D")
     (play-from-hand state :corp "Vanilla" "HQ")
     (let [eli (get-ice state :rd 0)
           vanilla (get-ice state :hq 0)]
       (play-from-hand state :corp "Wetwork Refit")
-      (is (not-any? #{"Eli 1.0"} (get-in @state [:runner :prompt :choices]))
+      (is (not-any? #{"Eli 1.0"} (get-in @state [:corp :prompt :choices]))
           "Unrezzed Eli 1.0 is not a choice to host Wetwork Refit")
       (prompt-choice :corp "Done")
 

@@ -8,14 +8,11 @@ http://www.jinteki.net
 
 [Gameplay videos](https://www.youtube.com/results?search_query=jinteki.net)
 
-![screenshot](https://dl.dropboxusercontent.com/u/5601199/screenshot.jpg)
+![screenshot](http://i.imgur.com/xkxOMHc.jpg)
 
 
-## Development status
+## Card implementation status
 
-The deck builder implements all the deck building constraints. It is optimised for fast deck editing. It is possible for instance to copy & paste a decklist from a forum and it will be parsed.
-
-The implementation of the game rules is in progress. About 95% of the cards are currently automated. For the cards that aren't, it is possible to resolve them manually most of the time.
 
 [Card rules implementation status](https://docs.google.com/spreadsheets/d/1ICv19cNjSaW9C-DoEEGH3iFt09PBTob4CAutGex0gnE/pubhtml)
 
@@ -25,31 +22,22 @@ The implementation of the game rules is in progress. About 95% of the cards are 
 * Node.js, Node Package Manager
 * Leiningen (version 2+)
 * MongoDB
-* Coffeescript
-* Bower
 * Zero MQ
 
 
 ## Installation
 
-Install Node.js dependencies:
+Install frontend dependencies:
 
 ```
 $ npm install
-```
-
-Install JavaScript dependencies:
-
-```
-$ bower install
 ```
 
 Launch MongoDB and fetch card data:
 
 ```
 $ mongod
-$ cd data
-$ coffee fetch.coffee
+$ npm run fetch
 ```
 
 Compile and watch client side Clojurescript files:
@@ -73,7 +61,7 @@ $ java -jar target/netrunner-0.1.0-SNAPSHOT-standalone.jar
 Launch the Node server:
 
 ```
-$ coffee server.coffee
+$ npm start
 ```
 
 ## Tests

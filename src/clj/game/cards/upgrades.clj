@@ -28,15 +28,15 @@
                                       :msg "prevent the Runner from accessing cards other than Ash 2X3ZB9CY"}}}}
 
    "Awakening Center"
-   {:abilities [{:label "Host a piece of bioroid ICE"
+   {:can-host (req (is-type? target "ICE"))
+    :abilities [{:label "Host a piece of bioroid ICE"
                  :cost [:click 1]
                  :prompt "Choose a piece of bioroid ICE to host on Awakening Center"
                  :choices {:req #(and (ice? %)
                                       (has-subtype? % "Bioroid")
                                       (in-hand? %))}
                  :msg "host a piece of bioroid ICE"
-                 :effect (effect (trigger-event :corp-install target)
-                                 (host card target {:facedown true}))}
+                 :effect (req (corp-install state side target card))}
                 {:req (req (and this-server (= (get-in @state [:run :position]) 0)))
                  :label "Rez a hosted piece of bioroid ICE"
                  :prompt "Choose a piece of bioroid ICE to rez" :choices (req (:hosted card))
@@ -50,18 +50,97 @@
                                                                   (unregister-events state side card))}} card))}]
     :events {:run-ends nil}}
 
+   "Bamboo Dome"
+   (letfn [(dome [dcard]
+             {:prompt "Select a card to add to HQ"
+              :delayed-completion true
+              :choices {:req #(and (= (:side %) "Corp")
+                                   (= (:zone %) [:play-area]))}
+              :msg "move a card to HQ"
+              :effect (effect (move target :hand)
+                              (continue-ability (put dcard) dcard nil))})
+           (put [dcard]
+             {:prompt "Select first card to put back onto R&D"
+              :delayed-completion true
+              :choices {:req #(and (= (:side %) "Corp")
+                                   (= (:zone %) [:play-area]))}
+              :msg "move remaining cards back to R&D"
+              :effect (effect (move target :deck {:front true})
+                              (move (first (get-in @state [:corp :play-area])) :deck {:front true})
+                              (clear-wait-prompt :runner)
+                              (effect-completed eid dcard))})]
+
+   {:init {:root "R&D"}
+    :abilities [{:cost [:click 1]
+                 :req (req (>= (count (:deck corp)) 3))
+                 :delayed-completion true
+                 :msg (msg (str "reveal " (join ", " (map :title (take 3 (:deck corp)))) " from R&D"))
+                 :label "Reveal the top 3 cards of R&D. Secretly choose 1 to add to HQ. Return the others to the top of R&D, in any order."
+                 :effect (req (doseq [c (take 3 (:deck corp))]
+                                (move state side c :play-area))
+                              (show-wait-prompt state :runner "Corp to use Bamboo Dome")
+                              (continue-ability state side (dome card) card nil))}]})
+
+   "Ben Musashi"
+   (let [bm {:req (req (or (= (:zone card) (:zone target)) (= (central->zone (:zone target)) (butlast (:zone card)))))
+             :effect (effect (steal-cost-bonus [:net-damage 2]))}]
+     {:trash-effect
+              {:req (req (and (= :servers (first (:previous-zone card))) (:run @state)))
+               :effect (effect (register-events {:pre-steal-cost (assoc bm :req (req (or (= (:zone target) (:previous-zone card))
+                                                                                         (= (central->zone (:zone target))
+                                                                                            (butlast (:previous-zone card))))))
+                                                 :run-ends {:effect (effect (unregister-events card))}}
+                                                (assoc card :zone '(:discard))))}
+      :events {:pre-steal-cost bm :run-ends nil}})
+
    "Bernice Mai"
-   {:events {:successful-run {:req (req this-server)
+   {:events {:successful-run {:interactive (req true)
+                              :req (req this-server)
                               :trace {:base 5 :msg "give the Runner 1 tag"
-                                      :effect (effect (tag-runner :runner 1))
+                                      :delayed-completion true
+                                      :effect (effect (tag-runner :runner eid 1))
                                       :unsuccessful {:effect (effect (system-msg "trashes Bernice Mai from the unsuccessful trace")
                                                                      (trash card))}}}}}
+
+   "Black Level Clearance"
+   {:events {:successful-run
+             {:interactive (req true)
+              :req (req this-server)
+              :delayed-completion true
+              :effect (effect (continue-ability
+                                {:prompt "Take 1 brain damage or jack out?"
+                                 :player :runner
+                                 :choices ["Take 1 brain damage" "Jack out"]
+                                 :effect (req (if (= target "Take 1 brain damage")
+                                                (damage state side eid :brain 1 {:card card})
+                                                (do (jack-out state side nil)
+                                                    (swap! state update-in [:runner :prompt] rest)
+                                                    (close-access-prompt state side)
+                                                    (handle-end-run state side)
+                                                    (gain state :corp :credit 5)
+                                                    (draw state :corp)
+                                                    (system-msg state :corp (str "gains 5 [Credits] and draws 1 card. Black Level Clearance is trashed"))
+                                                    (trash state side card)
+                                                    (effect-completed state side eid))))}
+                               card nil))}}}
 
    "Breaker Bay Grid"
    {:events {:pre-rez-cost {:req (req (and (is-remote? (second (:zone card)))
                                            (or (= (:zone card) (:zone target))
                                                (= (:zone card) (:zone (get-card state (:host target)))))))
                             :effect (effect (rez-cost-bonus -5))}}}
+
+   "Bryan Stinson"
+   {:abilities [{:cost [:click 1]
+                 :req (req (and (< (:credit runner) 6)
+                                (< 0 (count (filter #(and (is-type? % "Operation")
+                                                          (has-subtype? % "Transaction")) (:discard corp))))))
+                 :label "Play a transaction operation from Archives ignoring all costs and remove it from the game"
+                 :prompt "Choose a transaction operation to play"
+                 :msg (msg "play " (:title target) " from Archives ignoring all costs and remove it from the game")
+                 :choices (req (cancellable (filter #(and (is-type? % "Operation")
+                                                          (has-subtype? % "Transaction")) (:discard corp)) :sorted))
+                 :effect (effect (play-instant nil target {:ignore-cost true}) (move target :rfg))}]}
 
    "Caprice Nisei"
    {:events {:pass-ice {:req (req (and this-server
@@ -77,7 +156,8 @@
 
    "ChiLo City Grid"
    {:events {:successful-trace {:req (req this-server)
-                                :effect (effect (tag-runner :runner 1))
+                                :delayed-completion true
+                                :effect (effect (tag-runner :runner eid 1))
                                 :msg "give the Runner 1 tag"}}}
 
    "Corporate Troubleshooter"
@@ -113,7 +193,7 @@
                                     :req (req this-server)
                                     :effect (req (swap! state update-in [:run :run-effect] dissoc :replace-access)
                                                  (swap! state update-in [:run] dissoc :successful)
-                                                 (swap! state update-in [:runner :register :successful-run] #(rest %)))}}})
+                                                 (swap! state update-in [:runner :register :successful-run] #(next %)))}}})
 
    "Cyberdex Virus Suite"
    {:access {:delayed-completion true
@@ -131,11 +211,29 @@
    "Dedicated Technician Team"
    {:recurring 2}
 
+   "Defense Construct"
+   {:advanceable :always
+    :abilities [{:label "[Trash]: Add 1 facedown card from Archives to HQ for each advancement token"
+                 :req (req (and run (= (:server run) [:archives])
+                                (pos? (get-in card [:advance-counter] 0))))
+                 :effect (effect (resolve-ability
+                                   {:show-discard true
+                                    :choices {:max (get-in card [:advance-counter] 0)
+                                              :req #(and (= (:side %) "Corp")
+                                                         (not (:seen %))
+                                                         (= (:zone %) [:discard]))}
+                                              :msg (msg "add " (count targets) " facedown cards in Archives to HQ")
+                                    :effect (req (doseq [c targets]
+                                                   (move state side c :hand)))}
+                                  card nil)
+                                 (trash card))}]}
+
    "Disposable HQ"
    (letfn [(dhq [n i]
              {:req (req (pos? i))
               :prompt "Choose a card in HQ to add to the bottom of R&D"
-              :choices {:req #(and (:side % "Corp") (in-hand? %))}
+              :choices {:req #(and (= (:side %) "Corp")
+                                   (in-hand? %))}
               :msg "add a card to the bottom of R&D"
               :effect (req (move state side target :deck)
                            (when (< n i)
@@ -149,6 +247,13 @@
                                                 :effect (effect (resolve-ability (dhq 1 n) card nil))}
                                   :end-effect (effect (clear-wait-prompt :runner))}}
                                card nil)))}})
+
+   "Drone Screen"
+   {:events {:run {:req (req (and this-server tagged))
+                   :delayed-completion true
+                   :trace {:base 3
+                           :msg "do 1 meat damage"
+                           :effect (effect (damage eid :meat 1 {:card card :unpreventable true}))}}}}
 
    "Experiential Data"
    {:effect (req (update-ice-in-server state side (card->server state card)))
@@ -168,6 +273,15 @@
    {:derezzed-events {:runner-turn-ends corp-rez-toast}
     :events {:corp-turn-begins ability}
     :abilities [ability]})
+
+   "Fractal Threat Matrix"
+   {:implementation "Manual trigger each time all subs are broken"
+    :abilities [{:label "Trash the top 2 cards from the Stack"
+                 :msg (msg (let [deck (:deck runner)]
+                             (if (pos? (count deck))
+                               (str "trash " (join ", " (map :title (take 2 deck))) " from the Stack")
+                               "trash the top 2 cards from their Stack - but the Stack is empty")))
+                 :effect (effect (mill :runner 2))}]}
 
    "Georgia Emelyov"
    {:events {:unsuccessful-run {:req (req (= (first (:server target)) (second (:zone card))))
@@ -191,7 +305,36 @@
    {:abilities [{:req (req this-server)
                  :label "Force the Runner to lose all [Credits] from spending or losing a [Click]"
                  :msg (msg "force the Runner to lose all " (:credit runner) " [Credits]") :once :per-run
-                 :effect (effect (lose :runner :credit :all))}]}
+                 :effect (effect (lose :runner :credit :all :run-credit :all))}]}
+
+   "Helheim Servers"
+   {:abilities [{:label "Trash 1 card from HQ: All ice protecting this server has +2 strength until the end of the run"
+                 :req (req (and this-server (pos? (count run-ices)) (pos? (count (:hand corp)))))
+                 :delayed-completion true
+                 :effect (req (show-wait-prompt state :runner "Corp to use Helheim Servers")
+                              (when-completed
+                                (resolve-ability
+                                  state side
+                                  {:prompt "Choose a card in HQ to trash"
+                                   :choices {:req #(and (in-hand? %) (= (:side %) "Corp"))}
+                                   :effect (effect (trash target) (clear-wait-prompt :runner))} card nil)
+                                (do (register-events
+                                      state side
+                                      {:pre-ice-strength {:req (req (= (card->server state card)
+                                                                       (card->server state target)))
+                                                          :effect (effect (ice-strength-bonus 2 target))}
+                                       :run-ends {:effect (effect (unregister-events card))}} card)
+                                    (continue-ability
+                                      state side
+                                      {:effect (req (update-ice-in-server
+                                                      state side (card->server state card)))} card nil))))}]
+    :events {:pre-ice-strength nil}}
+
+   "Henry Phillips"
+   {:implementation "Manually triggered by Corp"
+    :abilities [{:req (req (and this-server tagged))
+                 :msg "gain 2 [Credits]"
+                 :effect (effect (gain :credit 2))}]}
 
    "Hokusai Grid"
    {:events {:successful-run {:req (req this-server) :msg "do 1 net damage"
@@ -209,6 +352,33 @@
                               (trash state side card {:cause :ability-cost})
                               (lose state :runner :tag 1))}]}
 
+   "Khondi Plaza"
+   {:recurring (effect (set-prop card :rec-counter (count (get-remotes @state))))
+    :effect (effect (set-prop card :rec-counter (count (get-remotes @state))))}
+
+   "K. P. Lynn"
+   (let [abi {:prompt "Choose one"
+              :player :runner
+              :choices ["Take 1 tag" "End the run"]
+              :effect (req (if (= target "Take 1 tag")
+                             (do (tag-runner state :runner 1)
+                                 (system-msg state :corp (str "uses K. P. Lynn. Runner chooses to take 1 tag")))
+                             (do (end-run state side)
+                                 (system-msg state :corp (str "uses K. P. Lynn. Runner chooses to end the run")))))}]
+     {:events {:pass-ice {:req (req (and this-server (= (:position run) 1))) ; trigger when last ice passed
+                          :delayed-completion true
+                          :effect (req (continue-ability state :runner abi card nil))}
+               :run {:req (req (and this-server (= (:position run) 0))) ; trigger on unprotected server
+                     :delayed-completion true
+                     :effect (req (continue-ability state :runner abi card nil))}}})
+
+   "Manta Grid"
+   {:events {:successful-run-ends
+             {:msg "gain a [Click] next turn"
+              :req (req (and (= (first (:server target)) (second (:zone card)))
+                             (or (< (:credit runner) 6) (zero? (:click runner)))))
+              :effect (req (swap! state update-in [:corp :extra-click-temp] (fnil inc 0)))}}}
+
    "Marcus Batty"
    {:abilities [{:req (req this-server)
                  :label "[Trash]: Start a Psi game"
@@ -218,6 +388,13 @@
                                                         (rezzed? %))}
                                    :msg (msg "resolve a subroutine on " (:title target))}}
                  :effect (effect (trash card))}]}
+
+   "Mason Bellamy"
+   {:implementation "Manually triggered by Corp"
+    :abilities [{:label "Force the Runner to lose [Click] after an encounter where they broke a subroutine"
+                 :req (req this-server)
+                 :msg "force the Runner to lose [Click]"
+                 :effect (effect (lose :runner :click 1))}]}
 
    "Midori"
    {:abilities
@@ -264,7 +441,8 @@
                                                              " with " (card-str state target)))))}]}
 
    "Mumbad Virtual Tour"
-   {:access {:req (req installed)
+   {:implementation "Only forces trash if runner has no Imps and enough credits in the credit pool"
+    :access {:req (req installed)
              :effect (req (let [trash-cost (trash-cost state side card)
                                 slow-trash (any-flag-fn? state :runner :slow-trash true)]
                             (if (and (can-pay? state :runner nil :credit trash-cost)
@@ -274,7 +452,7 @@
                               (toast state :runner
                                      (str "You must trash Mumbad Virtual Tour, if able, using any available means "
                                           "(Whizzard, Imp, Ghost Runner, Net Celebrity...)")))))}
-    :trash-effect {:when-unrezzed true
+    :trash-effect {:when-inactive true
                    :effect (req (swap! state assoc-in [:runner :register :force-trash] false))}}
 
    "NeoTokyo Grid"
@@ -284,14 +462,66 @@
              :msg "gain 1 [Credits]" :effect (effect (gain :credit 1))}]
      {:events {:advance ng :advancement-placed ng}})
 
+   "Nihongai Grid"
+   {:events
+    {:successful-run
+     {:interactive (req true)
+      :delayed-completion true
+      :req (req (and this-server
+                     (or (< (:credit runner) 6)
+                         (< (count (:hand runner)) 2))
+                     (not-empty (:hand corp))))
+      :effect (req (show-wait-prompt state :runner "Corp to use Nihongai Grid")
+                   (let [top5 (take 5 (:deck corp))]
+                     (if (pos? (count top5))
+                       (continue-ability state side
+                         {:optional
+                          {:prompt "Use Nihongai Grid to look at top 5 cards of R&D and swap one with a card from HQ?"
+                           :yes-ability
+                           {:delayed-completion true
+                            :prompt "Choose a card to swap with a card from HQ"
+                            :choices top5
+                            :effect (req (let [rdc target]
+                                           (continue-ability state side
+                                             {:delayed-completion true
+                                              :prompt (msg "Choose a card in HQ to swap for " (:title rdc))
+                                              :choices {:req in-hand?}
+                                              :msg "swap a card from the top 5 of R&D with a card in HQ"
+                                              :effect (req (let [hqc target
+                                                                 newrdc (assoc hqc :zone [:deck])
+                                                                 deck (vec (get-in @state [:corp :deck]))
+                                                                 rdcndx (first (keep-indexed #(when (= (:cid %2) (:cid rdc)) %1) deck))
+                                                                 newdeck (seq (apply conj (subvec deck 0 rdcndx) target (subvec deck rdcndx)))]
+                                                             (swap! state assoc-in [:corp :deck] newdeck)
+                                                             (swap! state update-in [:corp :hand]
+                                                                    (fn [coll] (remove-once #(not= (:cid %) (:cid hqc)) coll)))
+                                                             (move state side rdc :hand)
+                                                             (clear-wait-prompt state :runner)
+                                                             (effect-completed state side eid)))}
+                                            card nil)))}
+                           :no-ability {:effect (req (clear-wait-prompt state :runner)
+                                                     (effect-completed state side eid card))}}}
+                        card nil)
+                       (do (clear-wait-prompt state :runner)
+                           (effect-completed state side eid card)))))}}}
+
    "Oaktown Grid"
    {:events {:pre-trash {:req (req (and (is-remote? (second (:zone card)))
                                            (or (= (:zone card) (:zone target))
                                                (= (:zone card) (:zone (get-card state (:host target)))))))
                          :effect (effect (trash-cost-bonus 3))}}}
 
+   "Oberth Protocol"
+   {:additional-cost [:forfeit]
+    :events {:advance {:req (req (and (= (second (:zone target)) (second (:zone card)))
+                                      (empty? (filter #(= (second (:zone %)) (second (:zone card)))
+                                                      (map first (turn-events state side :advance))))))
+                       :msg (msg "place an additional advancement token on " (card-str state target))
+                       :effect (effect (add-prop :corp target :advance-counter 1 {:placed true}))}}}
+
    "Off the Grid"
-   {:effect (req (prevent-run-on-server state card (second (:zone card))))
+   {:implementation "Installation restriction not enforced"
+    :effect (req (prevent-run-on-server state card (second (:zone card))))
     :events {:runner-turn-begins {:effect (req (prevent-run-on-server state card (second (:zone card))))}
              :successful-run {:req (req (= target :hq))
                               :effect (req (trash state :corp card)
@@ -301,14 +531,22 @@
     :leave-play (req (enable-run-on-server state card (second (:zone card))))}
 
    "Old Hollywood Grid"
-   (let [ohg {:req (req this-server)
-              :effect (effect (register-run-flag!
+   (let [ohg {:req (req (or (= (:zone card) (:zone (get-nested-host target))) (= (central->zone (:zone target)) (butlast (:zone card)))))
+              :effect (effect (register-persistent-flag!
                                 card :can-steal
-                                (fn [state side card]
+                                (fn [state _ card]
                                   (if-not (some #(= (:title %) (:title card)) (:scored runner))
                                     ((constantly false) (toast state :runner "Cannot steal due to Old Hollywood Grid." "warning"))
                                     true))))}]
-     (assoc-in ohg [:events :run] ohg))
+     {:trash-effect
+              {:req (req (and (= :servers (first (:previous-zone card))) (:run @state)))
+               :effect (effect (register-events {:pre-steal-cost (assoc ohg :req (req (or (= (:zone (get-nested-host target)) (:previous-zone card))
+                                                                                          (= (central->zone (:zone target))
+                                                                                             (butlast (:previous-zone card))))))
+                                                 :run-ends {:effect (effect (unregister-events card))}}
+                                                (assoc card :zone '(:discard))))}
+      :events {:pre-steal-cost ohg
+               :post-access-card {:effect (effect (clear-persistent-flag! target :can-steal))}}})
 
    "Panic Button"
    {:init {:root "HQ"} :abilities [{:cost [:credit 1] :label "Draw 1 card" :effect (effect (draw))
@@ -336,9 +574,7 @@
                                                :msg "do 1 meat damage and give the Runner 1 tag"
                                                :delayed-completion true
                                                :effect (req (when-completed (damage state side :meat 1 {:card card})
-                                                                            (do (tag-runner state :runner 1)
-                                                                                ;; TO-DO: extend effect-completed to tag prevention
-                                                                                (effect-completed state side eid))))}}}
+                                                                            (tag-runner state :runner eid 1)))}}}
                                card nil))}}
 
    "Product Placement"
@@ -426,6 +662,21 @@
       :effect (effect (gain :credit (get-in card [:counter :credit] 0))
                       (set-prop card :counter {:credit 0}))}]}
 
+   "Signal Jamming"
+   {:abilities [{:label "[Trash]: Cards cannot be installed until the end of the run"
+                 :msg (msg "prevent cards being installed until the end of the run")
+                 :req (req this-server)
+                 :effect (effect (trash (get-card state card) {:cause :ability-cost}))}]
+    :trash-effect {:effect (effect (lock-install (:cid card) :runner)
+                                   (lock-install (:cid card) :corp)
+                                   (toast :runner "Cannot install until the end of the run")
+                                   (toast :corp "Cannot install until the end of the run")
+                                   (register-events {:run-ends {:effect (effect (unlock-install (:cid card) :runner)
+                                                                                (unlock-install (:cid card) :corp))}}
+                                                    (assoc card :zone '(:discard))))}
+    :events {:run-ends nil
+             :turn-ends {:effect (effect (unregister-events card))}}}
+
    "Simone Diego"
    {:recurring 2}
 
@@ -482,12 +733,14 @@
    {:events
     {:pre-resolve-damage
      {:once :per-run
+      :delayed-completion true
       :req (req (and this-server (= target :net) (> (last targets) 0) (can-pay? state :corp nil [:credit 2])))
       :effect (req (swap! state assoc-in [:damage :damage-replace] true)
                    (damage-defer state side :net (last targets))
                    (show-wait-prompt state :runner "Corp to use Tori Hanzō")
                    (resolve-ability state side
                      {:optional {:prompt (str "Pay 2 [Credits] to do 1 brain damage with Tori Hanzō?") :player :corp
+                                 :delayed-completion true
                                  :yes-ability {:msg "do 1 brain damage instead of net damage"
                                                :effect (req (swap! state update-in [:damage] dissoc :damage-replace)
                                                             (clear-wait-prompt state :runner)
@@ -500,6 +753,13 @@
      :prevented-damage {:req (req (and this-server (= target :net) (> (last targets) 0)))
                         :effect (req (swap! state assoc-in [:per-run (:cid card)] true))}}}
 
+   "Traffic Analyzer"
+   {:events {:rez {:req (req (and (= (second (:zone target)) (second (:zone card))) (ice? target)))
+                   :interactive (req true)
+                   :trace {:base 2
+                           :msg "gain 1 [Credits]"
+                           :effect (effect (gain :credit 1))}}}}
+
    "Tyrs Hand"
    {:abilities [{:label "[Trash]: Prevent a subroutine on a Bioroid from being broken"
                  :req (req (and (= (butlast (:zone current-ice)) (butlast (:zone card)))
@@ -508,12 +768,14 @@
                  :msg (msg "prevent a subroutine on " (:title current-ice) " from being broken")}]}
 
    "Underway Grid"
-   {:events {:pre-expose {:req (req (= (take 2 (:zone target)) (take 2 (:zone card))))
+   {:implementation "Bypass prevention is not implemented"
+    :events {:pre-expose {:req (req (= (take 2 (:zone target)) (take 2 (:zone card))))
                           :msg "prevent 1 card from being exposed"
                           :effect (effect (expose-prevent 1))}}}
 
    "Valley Grid"
-   {:abilities [{:req (req this-server)
+   {:implementation "Activation is manual"
+    :abilities [{:req (req this-server)
                  :label "Reduce Runner's maximum hand size by 1 until start of next Corp turn"
                  :msg "reduce the Runner's maximum hand size by 1 until the start of the next Corp turn"
                  :effect (req (update! state side (assoc card :times-used (inc (get card :times-used 0))))
@@ -534,8 +796,53 @@
                                                       (:times-used card))
                                                 (update! (dissoc card :times-used)))}}}
 
+   "Warroid Tracker"
+   (letfn [(wt [card n t]
+             {:prompt "Choose an installed card to trash due to Warroid Tracker"
+              :delayed-completion true
+              :player :runner
+              :priority 2
+              :choices {:req #(and (installed? %) (= (:side %) "Runner"))}
+              :effect (req (system-msg state side (str "trashes " (card-str state target) " due to Warroid Tracker"))
+                           (trash state side target {:unpreventable true})
+                           (if (> n t)
+                             (continue-ability state side (wt card n (inc t)) card nil)
+                             (do (clear-wait-prompt state :corp)
+                                 (effect-completed state side eid card)))
+                           ;; this ends-the-run if WT is the only card and is trashed, and trashes at least one runner card
+                           (when (zero? (count (cards-to-access state side (get-in @state [:run :server]))))
+                             (handle-end-run state side)))})]
+   {:implementation "Does not handle UFAQ interaction with Singularity"
+    :events {:runner-trash {:delayed-completion true
+                            :req (req (= (-> card :zone second) (-> target :zone second)))
+                            :trace {:base 4
+                                    :effect (req (let [n (count (all-installed state :runner))
+                                                       n (if (> n 2) 2 n)]
+                                                   (if (pos? n) (do (system-msg state side (str "uses Warroid Tracker to force the runner to trash " n " installed card(s)"))
+                                                                    (show-wait-prompt state :corp "Runner to choose cards to trash")
+                                                                    (resolve-ability state side (wt card n 1) card nil))
+                                                                (system-msg state side (str "uses Warroid Tracker but there are no installed cards to trash")))))}}}})
+
    "Will-o-the-Wisp"
-   {:abilities [{:label "[Trash]: Add an icebreaker to the bottom of Stack"
-                 :choices {:req #(has-subtype? % "Icebreaker")}
-                 :msg (msg "add " (:title target) " to the bottom of Stack")
-                 :effect (effect (trash card) (move :runner target :deck))}]}})
+   {:events
+    {:successful-run
+     {:interactive (req true)
+      :delayed-completion true
+      :req (req (and this-server
+                     (some #(has-subtype? % "Icebreaker") (all-installed state :runner))))
+      :effect (req (show-wait-prompt state :runner "Corp to use Will-o'-the-Wisp")
+                   (continue-ability state side
+                     {:optional
+                      {:prompt "Trash Will-o'-the-Wisp?"
+                       :choices {:req #(has-subtype? % "Icebreaker")}
+                       :yes-ability {:delayed-completion true
+                                     :prompt "Choose an icebreaker used to break at least 1 subroutine during this run"
+                                     :choices {:req #(has-subtype? % "Icebreaker")}
+                                     :msg (msg "add " (:title target) " to the bottom of the Runner's Stack")
+                                     :effect (effect (trash card)
+                                                     (move :runner target :deck)
+                                                     (clear-wait-prompt :runner)
+                                                     (effect-completed eid card))}
+                       :no-ability {:effect (effect (clear-wait-prompt :runner)
+                                                    (effect-completed eid card))}}}
+                    card nil))}}}})

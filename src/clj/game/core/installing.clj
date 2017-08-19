@@ -1,6 +1,6 @@
 (in-ns 'game.core)
 
-(declare host in-play? make-rid rez run-flag? server-list server->zone set-prop system-msg
+(declare host in-play? install-locked? make-rid rez run-flag? server-list server->zone set-prop system-msg
          turn-flag? update-breaker-strength update-ice-strength update-run-ice)
 
 ;;;; Functions for the installation and deactivation of cards.
@@ -10,7 +10,7 @@
   "Dissoc relevant keys in card"
   [card keep-counter]
   (let [c (dissoc card :current-strength :abilities :subroutines :runner-abilities :rezzed :special :new
-                  :added-virus-counter :subtype-target)
+                  :added-virus-counter :subtype-target :sifr-used :sifr-target)
         c (if keep-counter c (dissoc c :counter :rec-counter :advance-counter :extra-advance-counter))]
     (if (and (= (:side c) "Runner") (not= (last (:zone c)) :facedown))
       (dissoc c :installed :facedown :counter :rec-counter :pump :server-target) c)))
@@ -20,6 +20,7 @@
   [state side {:keys [disabled installed rezzed facedown zone host] :as card}]
   (when-let [leave-effect (:leave-play (card-def card))]
     (when (and (not disabled)
+               (not (and (= (:side card) "Runner") host (not installed) (not facedown)))
                (or (and (= (:side card) "Runner") installed (not facedown))
                    rezzed
                    (and host (not facedown))
@@ -112,11 +113,45 @@
 
 
 ;;; Intalling a corp card
+(defn- corp-can-install-reason
+  "Checks if the specified card can be installed.
+   Returns true if there are no problems
+   Returns :region if Region check fails
+   Returns :ice if ICE check fails
+   !! NB: This should only be used in a check with `true?` as all return values are truthy"
+  [state side card dest-zone]
+  (cond
+    ;; Region check
+    (and (has-subtype? card "Region")
+         (some #(has-subtype? % "Region") dest-zone))
+    :region
+    ;; ICE install prevented by Unscheduled Maintenance
+    (and (ice? card)
+         (not (turn-flag? state side card :can-install-ice)))
+    :ice
+    ;; Installing not locked
+    (install-locked? state side) :lock-install
+    ;; no restrictions
+    :default true))
+
 (defn- corp-can-install?
-  "Checks region restrictions"
-  [card dest-zone]
-  (not (and (has-subtype? card "Region")
-            (some #(has-subtype? % "Region") dest-zone))))
+  "Checks `corp-can-install-reason` if not true, toasts reason and returns false"
+  [state side card dest-zone]
+  (let [reason (corp-can-install-reason state side card dest-zone)
+        reason-toast #(do (toast state side % "warning") false)
+        title (:title card)]
+    (case reason
+      ;; pass on true value
+      true true
+      ;; failed region check
+      :region
+      (reason-toast (str "Cannot install " (:title card) ", limit of one Region per server"))
+      ;; failed install lock check
+      :lock-install
+      (reason-toast (str "Unable to install " title ", installing is currently locked"))
+      ;; failed ICE check
+      :ice
+      (reason-toast (str "Unable to install " title ": can only install 1 piece of ICE per turn")))))
 
 (defn- corp-install-asset-agenda
   "Takes care of installing an asset or agenda in a server"
@@ -152,7 +187,7 @@
 (defn corp-install
   ([state side card server] (corp-install state side (make-eid state) card server nil))
   ([state side card server args] (corp-install state side (make-eid state) card server args))
-  ([state side eid card server {:keys [extra-cost no-install-cost install-state host-card] :as args}]
+  ([state side eid card server {:keys [extra-cost no-install-cost install-state host-card action] :as args}]
    (cond
      ;; No server selected; show prompt to select an install site (Interns, Lateral Growth, etc.)
      (not server)
@@ -180,11 +215,10 @@
                                (not (ignore-install-cost? state side)))
                         (count dest-zone) 0)
              all-cost (concat extra-cost [:credit ice-cost])
-             end-cost (install-cost state side card all-cost)
+             end-cost (if no-install-cost 0 (install-cost state side card all-cost))
              install-state (or install-state (:install-state cdef))]
-
-         (if (corp-can-install? card dest-zone)
-           (if-let [cost-str (pay state side card end-cost)]
+         (when (and (corp-can-install? state side card dest-zone) (not (install-locked? state :corp)))
+           (if-let [cost-str (pay state side card end-cost action)]
              (do (let [c (-> card
                              (assoc :advanceable (:advanceable cdef) :new true)
                              (dissoc :seen :disabled))]
@@ -193,6 +227,7 @@
                    (when (not host-card)
                      (corp-install-asset-agenda state side c dest-zone)
                      (corp-install-message state side c server install-state cost-str))
+                   (play-sfx state side "install-corp")
 
                    (let [moved-card (if host-card
                                       (host state side host-card (assoc c :installed true))
@@ -200,24 +235,33 @@
                      (trigger-event state side :corp-install moved-card)
                      (when (is-type? c "Agenda")
                        (update-advancement-cost state side moved-card))
-                     (when (= install-state :rezzed-no-cost)
-                       (rez state side moved-card {:ignore-cost :all-costs}))
-                     (when (= install-state :rezzed)
-                       (rez state side moved-card))
-                     (when (= install-state :face-up)
-                       (if (:install-state cdef)
-                         (card-init state side
-                                    (assoc (get-card state moved-card) :rezzed true :seen true) false)
-                         (update! state side (assoc (get-card state moved-card) :rezzed true :seen true))))
+
+                     (cond
+                       ;; Ignore all costs. Pass eid to rez.
+                       (= install-state :rezzed-no-cost)
+                       (rez state side eid moved-card {:ignore-cost :all-costs})
+
+                       ;; Pay costs. Pass eid to rez.
+                       (= install-state :rezzed)
+                       (rez state side eid moved-card nil)
+
+                       ;; "Face-up" cards. Trigger effect-completed manually.
+                       (= install-state :face-up)
+                       (do (if (:install-state cdef)
+                             (card-init state side
+                                        (assoc (get-card state moved-card) :rezzed true :seen true) false)
+                             (update! state side (assoc (get-card state moved-card) :rezzed true :seen true)))
+                           (when-not (:delayed-completion cdef)
+                             (effect-completed state side eid)))
+
+                       ;; All other cards. Trigger effect-completed.
+                       :else
+                       (effect-completed state side eid))
+
                      (when-let [dre (:derezzed-events cdef)]
                        (when-not (:rezzed (get-card state moved-card))
-                         (register-events state side dre moved-card)))))))
-           ;; Cannot install due to region restriction - toast
-           (toast state side (str "Cannot install " (:title card) " in " server
-                                  ", limited to one Region per server")))
-         (clear-install-cost-bonus state side)
-         (when-not (:delayed-completion cdef)
-           (effect-completed state side eid card)))))))
+                         (register-events state side dre moved-card))))))))
+         (clear-install-cost-bonus state side))))))
 
 
 ;;; Installing a runner card
@@ -239,6 +283,8 @@
       (and (has-subtype? card "Console")
            (some #(has-subtype? % "Console") (all-installed state :runner)))
       :console
+      ;; Installing not locked
+      (install-locked? state side) :lock-install
       ;; Uniqueness check
       (and uniqueness (in-play? state card)) :unique
       ;; Req check
@@ -259,6 +305,9 @@
       :unique
       (reason-toast (str "Cannot install a second copy of " title " since it is unique. Please trash currently"
                          " installed copy first"))
+      ;; failed install lock check
+      :lock-install
+      (reason-toast (str "Unable to install " title " since installing is currently locked"))
       ;; failed console check
       :console
       (reason-toast (str "Unable to install " title ": an installed console prevents the installation of a replacement"))
@@ -300,14 +349,15 @@
   ([state side card] (runner-install state side (make-eid state) card nil))
   ([state side card params] (runner-install state side (make-eid state) card params))
   ([state side eid card {:keys [host-card facedown] :as params}]
-   (if (empty? (get-in @state [side :locked (-> card :zone first)]))
+   (if (and (empty? (get-in @state [side :locked (-> card :zone first)]))
+            (not (seq (get-in @state [:runner :lock-install]))))
      (if-let [hosting (and (not host-card) (not facedown) (:hosting (card-def card)))]
        (continue-ability state side
                          {:choices hosting
                           :prompt (str "Choose a card to host " (:title card) " on")
                           :effect (effect (runner-install eid card (assoc params :host-card target)))}
                          card nil)
-       (do (trigger-event state side :pre-install card)
+       (do (trigger-event state side :pre-install card facedown)
            (let [cost (runner-get-cost state side card params)]
              (if (runner-can-install? state side card facedown)
                (if-let [cost-str (pay state side card cost)]
@@ -320,6 +370,7 @@
                                         (update! state side c)
                                         (card-init state side c true))]
                    (runner-install-message state side (:title card) cost-str params)
+                   (play-sfx state side "install-runner")
                    (when (and (is-type? card "Program") (neg? (get-in @state [:runner :memory])))
                      (toast state :runner "You have run out of memory units!"))
                    (handle-virus-counter-flag state side installed-card)

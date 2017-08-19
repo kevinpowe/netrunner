@@ -20,7 +20,10 @@
                     {:max-count count :max-faction faction}
                     ;; Lost plurality
                     (= count max-count)
-                    (dissoc acc :max-faction)))
+                    (dissoc acc :max-faction)
+                    ;; Count is not more, do not change the accumulator map
+                    :default
+                    acc))
         best-faction (:max-faction (reduce-kv reducer {:max-count 0 :max-faction nil} faction-freq))]
     (= fc best-faction)))
 
@@ -29,22 +32,54 @@
   {"Adam: Compulsive Hacker"
    {:events {:pre-start-game
              {:req (req (= side :runner))
-              :effect (req (let [is-directive? #(has-subtype? % "Directive")
+              :delayed-completion true
+              :effect (req (show-wait-prompt state :corp "Runner to choose starting directives")
+                           (let [is-directive? #(has-subtype? % "Directive")
                                  directives (filter is-directive? (vals @all-cards))
                                  directives (map make-card directives)
                                  directives (zone :play-area directives)]
-                             ;; Add directives to :play-area - should be empty
+                             ;; Add directives to :play-area - assumed to be empty
                              (swap! state assoc-in [:runner :play-area] directives)
-                             ;; If more directives are printed this is probably where the runner gets to choose
-                             (doseq [c directives]
-                               (runner-install state side c {:no-cost true
-                                                             :custom-message (str "starts with " (:title c) " in play")}))
-                             (when (< 3 (count directives))
-                               ;; Extra directives have been added, ask player to use /rfg on the directives not used.
-                               ;; This implementation is just to make this more future proof, if extra directives are
-                               ;; actually added then a selection would be better
-                               (toast state :runner
-                                      (str "Please use /rfg to remove any directives other than the 3 you intend to start with.")))))}}}
+                             (continue-ability state side
+                                               {:prompt (str "Choose 3 starting directives")
+                                                :choices {:max 3
+                                                          :req #(and (= (:side %) "Runner")
+                                                                     (= (:zone %) [:play-area]))}
+                                                :effect (req (doseq [c targets]
+                                                               (runner-install state side c {:no-cost true
+                                                                                             :custom-message (str "starts with " (:title c) " in play")}))
+                                                             (swap! state assoc-in [:runner :play-area] [])
+                                                             (clear-wait-prompt state :corp))}
+                                               card nil)))}}}
+
+   "AgInfusion: New Miracles for a New World"
+   {:abilities [{:once :per-turn
+                 :req (req (and (:run @state) (not (rezzed? current-ice))))
+                 :prompt "Choose another server and redirect the run to its outermost position"
+                 :choices (req (cancellable servers))
+                 :msg (msg "trash the approached ICE. The Runner is now running on " target)
+                 :effect (req (let [dest (server->zone state target)]
+                                (trash state side current-ice)
+                                (swap! state update-in [:run]
+                                       #(assoc % :position (count (get-in corp (conj dest :ices)))
+                                                 :server (rest dest)))))}]}
+
+   "Alice Merchant: Clan Agitator"
+   {:events {:successful-run
+             {:delayed-completion true
+              :interactive (req true)
+              :req (req (and (= target :archives)
+                             (first-successful-run-on-server? state :archives)
+                             (not-empty (:hand corp))))
+              :effect (effect (show-wait-prompt :runner "Corp to trash 1 card from HQ")
+                              (continue-ability
+                                {:prompt "Choose a card in HQ to discard"
+                                 :player :corp
+                                 :choices (req (:hand corp))
+                                 :msg "force the Corp to trash 1 card from HQ"
+                                 :effect (effect (trash :corp target)
+                                                 (clear-wait-prompt :runner))}
+                               card nil))}}}
 
    "Andromeda: Dispossessed Ristie"
    {:events {:pre-start-game {:req (req (= side :runner))
@@ -55,8 +90,9 @@
    (let [ability {:prompt "Select a card to install facedown"
                   :label "Install a card facedown (start of turn)"
                   :once :per-turn
-                  :choices {:max 1 :req #(and (:side % "Runner")
-                                              (in-hand? %))}
+                  :choices {:max 1
+                            :req #(and (= (:side %) "Runner")
+                                       (in-hand? %))}
                   :req (req (> (count (:hand runner)) 0))
                   :effect (effect (runner-install target {:facedown true}))}]
      {:events {:runner-turn-begins ability}
@@ -65,12 +101,12 @@
    "Argus Security: Protection Guaranteed"
    {:events {:agenda-stolen
              {:prompt "Take 1 tag or suffer 2 meat damage?"
+              :delayed-completion true
               :choices ["1 tag" "2 meat damage"] :player :runner
               :msg "make the Runner take 1 tag or suffer 2 meat damage"
               :effect (req (if (= target "1 tag")
                              (do (system-msg state side "chooses to take 1 tag")
-                                 (tag-runner state :runner 1)
-                                 (effect-completed state side eid nil))
+                                 (tag-runner state :runner eid 1))
                              (do (system-msg state side "chooses to suffer 2 meat damage")
                                  (damage state :runner eid :meat 2 {:unboostable true :card card}))))}}}
 
@@ -78,6 +114,36 @@
    {:events {:runner-trash {:req (req (and (= side :runner) (= (second targets) :ability-cost)))
                             :msg "draw a card"
                             :effect (effect (draw 1))}}}
+
+   "Ayla \"Bios\" Rahim: Simulant Specialist"
+   {:abilities [{:label "[:click] Add 1 card from NVRAM to your grip"
+                 :cost [:click 1]
+                 :delayed-completion true
+                 :prompt "Choose a card from NVRAM"
+                 :choices (req (cancellable (:hosted card)))
+                 :msg "move a card from NVRAM to their Grip"
+                 :effect (effect (move target :hand)
+                                 (effect-completed eid card))}]
+    :events {:pre-start-game
+             {:req (req (= side :runner))
+              :delayed-completion true
+              :effect (req (show-wait-prompt state :corp "the Runner to choose cards for NVRAM")
+                           (doseq [c (take 6 (:deck runner))]
+                             (move state side c :play-area))
+                             (continue-ability state side
+                                               {:prompt (str "Choose 4 cards for NVRAM")
+                                                :delayed-completion true
+                                                :choices {:max 4
+                                                          :all true
+                                                          :req #(and (= (:side %) "Runner")
+                                                                     (= (:zone %) [:play-area]))}
+                                                :effect (req (doseq [c targets]
+                                                               (host state side (get-card state card) c {:facedown true}))
+                                                             (doseq [c (get-in @state [:runner :play-area])]
+                                                               (move state side c :deck))
+                                                             (shuffle! state side :deck)
+                                                             (clear-wait-prompt state :corp)
+                                                             (effect-completed state side eid card))} card nil))}}}
 
    "Blue Sun: Powering the Future"
    {:flags {:corp-phase-12 (req (and (not (:disabled card))
@@ -117,11 +183,11 @@
     {:corp-phase-12 {:effect (effect (enable-corp-damage-choice))}
      :runner-phase-12 {:effect (effect (enable-corp-damage-choice))}
      :pre-resolve-damage
-     {:once :per-turn
-      :delayed-completion true
+     {:delayed-completion true
       :req (req (and (= target :net)
                      (corp-can-choose-damage? state)
-                     (> (last targets) 0)))
+                     (> (last targets) 0)
+                     (empty? (filter #(= :net (first %)) (turn-events state :runner :damage)))))
       :effect (req (damage-defer state side :net (last targets))
                    (if (= 0 (count (:hand runner)))
                      (do (swap! state update-in [:damage] dissoc :damage-choose-corp)
@@ -150,6 +216,8 @@
                              :no-ability {:effect (req (clear-wait-prompt state :runner)
                                                        (swap! state update-in [:damage] dissoc :damage-choose-corp))}}}
                            card nil))))}}
+    :req (req (empty? (filter #(= :net (first %)) (turn-events state :runner :damage))))
+    :effect (effect (enable-corp-damage-choice))
     :leave-play (req (swap! state update-in [:damage] dissoc :damage-choose-corp))}
 
    "Cybernetics Division: Humanity Upgraded"
@@ -162,7 +230,8 @@
    {:events {:access {:once :per-turn
                       :req (req (and (is-type? target "Operation")
                                      (turn-flag? state side card :can-trash-operation)))
-                      :effect (effect (trash target))
+                      :effect (req (trash state side target)
+                                   (swap! state assoc-in [:runner :register :trashed-card] true))
                       :msg (msg "trash " (:title target))}
              :successful-run-ends {:req (req (and (= (:server target) [:archives])
                                                   (nil? (:replace-access (:run-effect target)))
@@ -193,8 +262,10 @@
 
    "Gabriel Santiago: Consummate Professional"
    {:events {:successful-run {:silent (req true)
-                              :msg "gain 2 [Credits]" :once :per-turn
-                              :effect (effect (gain :credit 2)) :req (req (= target :hq))}}}
+                              :req (req (and (= target :hq)
+                                             (first-successful-run-on-server? state :hq)))
+                              :msg "gain 2 [Credits]"
+                              :effect (effect (gain :credit 2)) }}}
 
    "Gagarin Deep Space: Expanding the Horizon"
    {:flags {:slow-remote-access (req (not (:disabled card)))}
@@ -216,31 +287,32 @@
                    true))]
      {:events {:agenda-stolen
                {:effect (effect (register-turn-flag! card :can-steal haarp))}}
-      :effect (req (when-not (first-event state side :agenda-stolen)
+      :effect (req (when-not (first-event? state side :agenda-stolen)
                      (register-turn-flag! state side card :can-steal haarp)))
       :leave-play (effect (clear-turn-flag! card :can-steal))})
 
    "Haas-Bioroid: Architects of Tomorrow"
    {:events {:pass-ice
-             {:once :per-turn
-              :delayed-completion true
+             {:delayed-completion true
+              :once :per-turn
               :req (req (and (rezzed? target)
-                             (has-subtype? target "Bioroid")))
-              :effect (req (if (some #(and (has-subtype? % "Bioroid") (not (rezzed? %))) (all-installed state :corp))
-                             (do (show-wait-prompt state :runner "Corp to use Haas-Bioroid: Architects of Tomorrow")
-                                 (continue-ability state side
-                                                   {:prompt "Choose a bioroid to rez" :player :corp
-                                                    :choices {:req #(and (has-subtype? % "Bioroid") (not (rezzed? %)))}
-                                                    :msg (msg "rez " (:title target))
-                                                    :cancel-effect (final-effect (clear-wait-prompt :runner))
-                                                    :effect (effect (rez-cost-bonus -4)
-                                                                    (rez target)
-                                                                    (clear-wait-prompt :runner))}
-                                                   card nil))
-                             (effect-completed state side eid)))}}}
+                             (has-subtype? target "Bioroid")
+                             (empty? (filter #(and (rezzed? %) (has-subtype? % "Bioroid"))
+                                             (turn-events state side :pass-ice)))))
+              :effect (effect (show-wait-prompt :runner "Corp to use Haas-Bioroid: Architects of Tomorrow")
+                              (continue-ability
+                                {:prompt "Choose a bioroid to rez" :player :corp
+                                 :choices {:req #(and (has-subtype? % "Bioroid") (not (rezzed? %)))}
+                                 :msg (msg "rez " (:title target))
+                                 :cancel-effect (final-effect (clear-wait-prompt :runner))
+                                 :effect (effect (rez-cost-bonus -4)
+                                                 (rez target)
+                                                 (clear-wait-prompt :runner))}
+                               card nil))}}}
 
    "Haas-Bioroid: Engineering the Future"
-   {:events {:corp-install {:once :per-turn :msg "gain 1 [Credits]"
+   {:events {:corp-install {:req (req (first-event? state corp :corp-install))
+                            :msg "gain 1 [Credits]"
                             :effect (effect (gain :credit 1))}}}
 
    "Haas-Bioroid: Stronger Together"
@@ -268,9 +340,9 @@
 
    "Hayley Kaplan: Universal Scholar"
    {:events {:runner-install
-             {:silent (req (not (and (first-event state side :runner-install)
+             {:silent (req (not (and (first-event? state side :runner-install)
                                      (some #(is-type? % (:type target)) (:hand runner)))))
-              :req (req (and (first-event state side :runner-install)
+              :req (req (and (first-event? state side :runner-install)
                              (some #(is-type? % (:type target)) (:hand runner))))
               :once :per-turn
               :delayed-completion true
@@ -305,7 +377,8 @@
    {:events (let [inf {:req (req (and (not (:disabled card))
                                       (has-most-faction? state :corp "NBN")))
                        :msg "give the Runner 1 tag"
-                       :effect (effect (tag-runner :runner 1))}]
+                       :delayed-completion true
+                       :effect (effect (tag-runner :runner eid 1))}]
               {:pre-start-game {:effect draft-points-target}
                :agenda-scored inf :agenda-stolen inf})}
 
@@ -313,10 +386,24 @@
    {:events {:pre-start-game {:effect draft-points-target}
              :pre-install {:req (req (and (has-most-faction? state :runner "Shaper")
                                           (pos? (count (:deck runner)))
-                                          (first-event state side :pre-install)))
+                                          (first-event? state side :pre-install)))
                            :msg "draw 1 card"
                            :once :per-turn
                            :effect (effect (draw 1))}}}
+
+   "Jemison Astronautics: Sacrifice. Audacity. Success."
+   {:events {:corp-forfeit-agenda
+             {:delayed-completion true
+              :effect (req (show-wait-prompt state :runner "Corp to place advancement tokens")
+                           (let [p (inc (get-agenda-points state :corp target))]
+                             (continue-ability state side
+                               {:prompt "Choose a card to place advancement tokens on with Jemison Astronautics: Sacrifice. Audacity. Success."
+                                :choices {:req #(and (installed? %) (= (:side %) "Corp"))}
+                                :msg (msg "place " p " advancement tokens on " (card-str state target))
+                                :cancel-effect (effect (clear-wait-prompt :runner))
+                                :effect (effect (add-prop :corp target :advance-counter p {:placed true})
+                                                (clear-wait-prompt :runner))}
+                              card nil)))}}}
 
    "Jesminder Sareen: Girl Behind the Curtain"
    {:events {:pre-tag {:once :per-run
@@ -333,7 +420,7 @@
 
    "Jinteki: Potential Unleashed"
    {:events {:pre-resolve-damage
-             {:req (req (and (= target :net) (pos? (last targets))))
+             {:req (req (and (-> @state :corp :disable-id not) (= target :net) (pos? (last targets))))
               :effect (req (let [c (first (get-in @state [:runner :deck]))]
                              (system-msg state :corp (str "uses Jinteki: Potential Unleashed to trash " (:title c)
                                                           " from the top of the Runner's Stack"))
@@ -347,6 +434,9 @@
            :req (req (is-central? (:server run)))
            :effect (req (apply enable-run-on-server
                                state card (map first (get-remotes @state))))}}
+    :req (req (empty? (let [successes (turn-events state side :successful-run)]
+                        (filter #(is-central? %) successes))))
+    :effect (req (apply prevent-run-on-server state card (map first (get-remotes @state))))
     :leave-play (req (apply enable-run-on-server state card (map first (get-remotes @state))))}
 
    "Jinteki Biotech: Life Imagined"
@@ -398,12 +488,17 @@
                               :effect (req (swap! state assoc-in [:per-turn (:cid card)] true))}}}
 
    "Ken \"Express\" Tenma: Disappeared Clone"
-   {:events {:play-event {:req (req (has-subtype? target "Run")) :once :per-turn
-                          :msg "gain 1 [Credits]" :effect (effect (gain :credit 1))}}}
+   {:events {:play-event {:req (req (and (has-subtype? target "Run")
+                                         (empty? (filter #(has-subtype? % "Run")
+                                                         ;; have to flatten because each element is a list containing
+                                                         ;; the Event card that was played
+                                                         (flatten (turn-events state :runner :play-event))))))
+                          :msg "gain 1 [Credits]"
+                          :effect (effect (gain :credit 1))}}}
 
    "Khan: Savvy Skiptracer"
    {:events {:pass-ice
-             {:once :per-turn
+             {:req (req (first-event? state :corp :pass-ice))
               :delayed-completion true
               :effect (req (if (some #(has-subtype? % "Icebreaker") (:hand runner))
                              (continue-ability state side
@@ -435,15 +530,24 @@
    "Leela Patel: Trained Pragmatist"
    (let [leela {:interactive (req true)
                 :prompt "Select an unrezzed card to return to HQ"
-                :choices {:req #(and (not (:rezzed %)) (card-is? % :side :corp))}
+                :choices {:req #(and (not (rezzed? %)) (installed? %) (card-is? % :side :corp))}
                 :msg (msg "add " (card-str state target) " to HQ")
                 :effect (final-effect (move :corp target :hand))}]
      {:flags {:slow-hq-access (req true)}
       :events {:agenda-scored leela
                :agenda-stolen leela}})
 
+   "Los: Data Hijacker"
+   {:events {:rez {:once :per-turn
+                   :req (req (ice? target))
+                   :msg "gain 2 [Credits]"
+                   :effect (effect (gain :runner :credit 2))}}}
+
    "MaxX: Maximum Punk Rock"
-   (let [ability {:msg "trash the top 2 cards from Stack and draw 1 card"
+   (let [ability {:msg (msg (let [deck (:deck runner)]
+                              (if (pos? (count deck))
+                                (str "trash " (join ", " (map :title (take 2 deck))) " from their Stack and draw 1 card")
+                                "trash the top 2 cards from their Stack and draw 1 card - but their Stack is empty")))
                   :once :per-turn
                   :effect (effect (mill 2) (draw))}]
      {:flags {:runner-turn-draw true
@@ -470,25 +574,28 @@
                                   (swap! state update-in [:bonus] dissoc :cost))))}]}
 
    "NBN: Controlling the Message"
-   {:events {:runner-trash
+   (let [cleanup (effect (update! :corp (dissoc card :saw-trash)))]
+   {:events {:corp-turn-ends {:effect cleanup}
+             :runner-turn-ends {:effect cleanup}
+             :runner-trash
              {:delayed-completion true
-              :req (req (and (let [trashes (flatten (turn-events state side :runner-trash))]
-                               (empty? (filter #(card-is? % :side :corp) trashes)))
+              :req (req (and (not (:saw-trash card))
                              (card-is? target :side :corp)
                              (installed? target)))
               :effect (req (show-wait-prompt state :runner "Corp to use NBN: Controlling the Message")
+                           (update! state :corp (assoc card :saw-trash true))
                            (continue-ability
                              state :corp
                              {:optional
-                              {:delayed-completion true
-                               :prompt "Trace the Runner with NBN: Controlling the Message?"
+                              {:prompt "Trace the Runner with NBN: Controlling the Message?"
                                :yes-ability {:trace {:base 4
                                                      :msg "give the Runner 1 tag"
-                                                     :effect (effect (tag-runner :runner 1 {:unpreventable true})
+                                                     :delayed-completion true
+                                                     :effect (effect (tag-runner :runner eid 1 {:unpreventable true})
                                                                      (clear-wait-prompt :runner))
                                                      :unsuccessful {:effect (effect (clear-wait-prompt :runner))}}}
                                :no-ability {:effect (effect (clear-wait-prompt :runner))}}}
-                             card nil))}}}
+                             card nil))}}})
 
    "NBN: Making News"
    {:recurring 2}
@@ -498,7 +605,9 @@
     :leave-play (effect (lose :hand-size-modification 1))}
 
    "Near-Earth Hub: Broadcast Center"
-   {:events {:server-created {:msg "draw 1 card" :once :per-turn :effect (effect (draw 1))}}}
+   {:events {:server-created {:req (req (first-event? state :corp :server-created))
+                              :msg "draw 1 card"
+                              :effect (effect (draw 1))}}}
 
    "Nero Severn: Information Broker"
    {:abilities [{:req (req (has-subtype? current-ice "Sentry"))
@@ -524,7 +633,7 @@
    "NEXT Design: Guarding the Net"
    (let [ndhelper (fn nd [n] {:prompt (msg "When finished, click NEXT Design: Guarding the Net to draw back up to 5 cards in HQ. "
                                            "Choose a piece of ICE in HQ to install:")
-                              :choices {:req #(and (:side % "Corp")
+                              :choices {:req #(and (= (:side %) "Corp")
                                                    (ice? %)
                                                    (in-hand? %))}
                               :effect (req (corp-install state side target nil)
@@ -561,7 +670,7 @@
              {:req (req (= (:cid target) (get-in card [:null-target :cid])))
               :effect (effect (ice-strength-bonus -2 target))}
              :run-ends
-             {:effect (effect (update! (dissoc card :null-target)))}}}
+             {:effect (req (swap! state dissoc-in [:runner :identity :null-target]))}}}
 
    "Omar Keung: Conspiracy Theorist"
    {:abilities [{:cost [:click 1]
@@ -583,11 +692,12 @@
                                                  (trigger-event state :corp :no-action)
                                                  (swap! state update-in [:runner :register :successful-run] #(conj % target-server))
                                                  (system-msg state side (str "uses Omar Keung: Conspiracy Theorist to make a successful run on " target))))}
-             :run-ends {:effect (effect (update! (dissoc card :omar-run-activated)))}}}
+             :run-ends {:effect (req (swap! state dissoc-in [:runner :identity :omar-run-activated]))}}}
 
    "Pālanā Foods: Sustainable Growth"
-   {:events {:runner-draw {:msg "gain 1 [Credits]"
-                           :once :per-turn
+   {:events {:runner-draw {:req (req (and (first-event? state :corp :runner-draw)
+                                          (pos? target)))
+                           :msg "gain 1 [Credits]"
                            :effect (effect (gain :corp :credit 1))}}}
 
    "Quetzal: Free Spirit"
@@ -608,26 +718,88 @@
                                 (update! state side (assoc ice :subtype (combine-subtypes true stypes "Code Gate")))
                                 (register-events state side
                                                  {:run-ends {:effect (effect (update! (assoc ice :subtype stypes))
+                                                                             (trigger-event :ice-subtype-changed ice)
                                                                              (unregister-events card))}} card)
                                 (update-ice-strength state side ice)
-                                (trigger-event state side :ice-subtype-changed)))}]
+                                (trigger-event state side :ice-subtype-changed ice)))}]
     :events {:run-ends nil}}
+
+   "Seidr Laboratories: Destiny Defined"
+   {:implementation "Manually triggered"
+    :abilities [{:req (req (:run @state))
+                 :once :per-turn
+                 :prompt "Choose a card to add to the top of R&D"
+                 :show-discard true
+                 :choices {:req #(and (= (:side %) "Corp") (in-discard? %))}
+                 :effect (effect (move target :deck {:front true}))
+                 :msg (msg "add " (if (:seen target) (:title target) "a card") " to the top of R&D")}]}
 
    "Silhouette: Stealth Operative"
    {:events {:successful-run
              {:interactive (req (some #(not (rezzed? %)) (all-installed state :corp)))
               :delayed-completion true
-              :req (req (= target :hq)) :once :per-turn
+              :req (req (and (= target :hq)
+                             (first-successful-run-on-server? state :hq)))
               :effect (effect (continue-ability {:choices {:req #(and installed? (not (rezzed? %)))}
-                                                 :effect (effect (expose target)) :msg "expose 1 card"}
+                                                 :effect (effect (expose eid target)) :msg "expose 1 card"
+                                                 :delayed-completion true }
                                                 card nil))}}}
+
+   "Skorpios Defense Systems: Persuasive Power"
+   {:implementation "Manually triggered, no restriction on which cards in Heap can be targeted"
+    :abilities [{:label "Remove a card in the Heap that was just trashed from the game"
+                 :prompt "Choose a card in the Runner's Heap that was just trashed"
+                 :once :per-turn
+                 :choices (req (:discard runner))
+                 :msg (msg "remove " (:title target) " from the game")
+                 :effect (effect (move :runner target :rfg))}]}
 
    "Spark Agency: Worldswide Reach"
    {:events
-    {:rez {:req (req (has-subtype? target "Advertisement"))
-           :once :per-turn
+    {:rez {:req (req (and (has-subtype? target "Advertisement")
+                          (empty? (filter #(has-subtype? % "Advertisement")
+                                          (flatten (turn-events state :corp :rez))))))
            :effect (effect (lose :runner :credit 1))
            :msg (msg "make the Runner lose 1 [Credits] by rezzing an advertisement")}}}
+
+   "Steve Cambridge: Master Grifter"
+   {:events {:successful-run
+             {:req (req (and (= target :hq)
+                             (first-successful-run-on-server? state :hq)
+                             (if (-> @state :run :run-effect :card)
+                               (> (count (:discard runner)) 2)
+                               (> (count (:discard runner)) 1))))
+              :interactive (req true)
+              :delayed-completion true
+              :effect (effect (continue-ability
+                                {:delayed-completion true
+                                 :prompt "Choose 2 cards in your Heap"
+                                 :show-discard true
+                                 :choices {:max 2 :req #(and (in-discard? %)
+                                                             (= (:side %) "Runner")
+                                                             (not= (-> @state :run :run-effect :card :cid) (:cid %)))}
+                                 :cancel-effect (req (effect-completed state side eid))
+                                 :effect (req (let [c1 (first targets)
+                                                    c2 (second targets)]
+                                                (show-wait-prompt state :runner "Corp to choose which card to remove from the game")
+                                                (continue-ability state :corp
+                                                  {:prompt "Choose which card to remove from the game"
+                                                   :player :corp
+                                                   :choices [c1 c2]
+                                                   :effect (req (if (= target c1)
+                                                                  (do (move state :runner c1 :rfg)
+                                                                      (move state :runner c2 :hand)
+                                                                      (system-msg state :runner (str "uses Steve Cambridge: Master Grifter"
+                                                                                                     " to add " (:title c2) " to their Grip."
+                                                                                                     " Corp removes " (:title c1) " from the game")))
+                                                                  (do (move state :runner c2 :rfg)
+                                                                      (move state :runner c1 :hand)
+                                                                      (system-msg state :runner (str "uses Steve Cambridge: Master Grifter"
+                                                                                                     " to add " (:title c1) " to their Grip."
+                                                                                                     " Corp removes " (:title c2) " from the game"))))
+                                                                (clear-wait-prompt state :runner)
+                                                                (effect-completed state side eid))} card nil)))}
+                               card nil))}}}
 
    "Strategic Innovations: Future Forward"
    {:events {:pre-start-game {:effect draft-points-target}
@@ -638,7 +810,7 @@
               :prompt "Choose a card in Archives to shuffle into R&D"
               :choices {:req #(and (card-is? % :side :corp) (= (:zone %) [:discard]))}
               :player :corp :show-discard true :priority true
-              :msg (msg "to shuffle " (if (:seen target) (:title target) "a card")
+              :msg (msg "shuffle " (if (:seen target) (:title target) "a card")
                         " into R&D")
               :effect (effect (move :corp target :deck)
                               (shuffle! :corp :deck))}}}
@@ -685,21 +857,28 @@
                                      (not= 1 (:turn @state)) (not (:successful-run runner-reg))))}
     :abilities [{:msg (msg "place 1 advancement token on " (card-str state target))
                  :choices {:req installed?}
-                 :req (req (not (:successful-run runner-reg)))
+                 :req (req (and (:corp-phase-12 @state) (not (:successful-run runner-reg))))
                  :once :per-turn
                  :effect (effect (add-prop target :advance-counter 1 {:placed true}))}]}
 
    "The Foundry: Refining the Process"
    {:events
     {:rez {:req (req (and (ice? target) ;; Did you rez and ice just now
-                          (some #(= (:title %) (:title target)) (:deck corp)) ;; Are there more copies in the dec
+                          ;; Are there more copies in the deck or play area (ABT interaction)?
+                          ;; (some #(= (:title %) (:title target)) (concat (:deck corp) (:play-area corp)))
+                          ;; Based on ruling re: searching and failing to find, we no longer enforce the requirement
+                          ;; of there being a target ice to bring into HQ.
                           (empty? (let [rezzed-this-turn (map first (turn-events state side :rez))]
                                     (filter ice? rezzed-this-turn))))) ;; Is this the first ice you've rezzed this turn
            :optional
-           {:prompt "Add another copy to HQ?" :priority 1
-            :yes-ability {:msg (msg "add a copy of " (:title target) " from R&D to HQ")
-                          :effect (effect (shuffle! :deck)
-                                          (move (some #(when (= (:title %) (:title target)) %) (:deck corp)) :hand))}}}}}
+           {:prompt "Add another copy to HQ?"
+            :yes-ability {:effect (req (if-let [found-card (some #(when (= (:title %) (:title target)) %) (concat (:deck corp) (:play-area corp)))]
+                                         (do (move state side found-card :hand)
+                                             (system-msg state side (str "uses The Foundry to add a copy of "
+                                                                         (:title found-card) " to HQ, and shuffles their deck"))
+                                             (shuffle! state side :deck))
+                                         (do (system-msg state side (str "fails to find a target for The Foundry, and shuffles their deck"))
+                                             (shuffle! state side :deck))))}}}}}
 
    "The Masque: Cyber General"
    {:events {:pre-start-game {:effect draft-points-target}}}
@@ -721,10 +900,15 @@
    {:recurring 1}
 
    "Weyland Consortium: Builder of Nations"
-   {:abilities [{:label "Do 1 meat damage"
+   {:implementation "Damage triggered manually"
+    :abilities [{:label "Do 1 meat damage"
+                 :once :per-turn
+                 :prompt "Do a meat damage from identity ability?"
+                 :choices (cancellable ["Yes"])
                  :delayed-completion true
-                 :msg "do 1 meat damage"
-                 :effect (effect (damage eid :meat 1 {:card card}))}]}
+                 :effect (req (when (= target "Yes")
+                                (damage state :runner eid :meat 1 {:card card})
+                                (system-msg state side "uses Weyland Consortium: Builder of Nations to do 1 meat damage")))}]}
 
    "Weyland Consortium: Building a Better World"
    {:events {:play-operation {:msg "gain 1 [Credits]"

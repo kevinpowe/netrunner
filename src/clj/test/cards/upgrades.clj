@@ -22,6 +22,105 @@
         (is (get-in (refresh spid) [:rezzed]) "Spiderweb rezzed")
         (is (= 1 (:credit (get-corp))) "Paid only 1 credit to rez")))))
 
+(deftest ben-musashi
+  ;; Ben Musashi - pay 2 net damage to steal from this server
+  (do-game
+    (new-game (default-corp [(qty "Ben Musashi" 1) (qty "House of Knives" 1)])
+              (default-runner))
+    (play-from-hand state :corp "Ben Musashi" "New remote")
+    (play-from-hand state :corp "House of Knives" "Server 1")
+    (take-credits state :corp 1)
+    (let [bm (get-content state :remote1 0)
+          hok (get-content state :remote1 1)]
+      (core/rez state :corp bm)
+      (run-empty-server state "Server 1")
+      ;; runner now chooses which to access.
+      (prompt-select :runner hok)
+      ;; prompt should be asking for the 2 net damage cost
+      (is (= "House of Knives" (:title (:card (first (:prompt (get-runner))))))
+          "Prompt to pay 2 net damage")
+      (prompt-choice :runner "No")
+      (is (= 5 (:credit (get-runner))) "Runner did not pay 2 net damage")
+      (is (= 0 (count (:scored (get-runner)))) "No scored agendas")
+      (prompt-select :runner bm)
+      (prompt-choice :runner "No")
+      (run-empty-server state "Server 1")
+      (prompt-select :runner hok)
+      (prompt-choice :runner "Yes")
+      (is (= 2 (count (:discard (get-runner)))) "Runner took 2 net")
+      (is (= 1 (count (:scored (get-runner)))) "1 scored agenda"))))
+
+(deftest ben-musashi-trash
+  ;; Ben Musashi - pay even when trashed
+  (do-game
+    (new-game (default-corp [(qty "Ben Musashi" 3) (qty "House of Knives" 3)])
+              (default-runner))
+    (play-from-hand state :corp "Ben Musashi" "New remote")
+    (play-from-hand state :corp "House of Knives" "Server 1")
+    (take-credits state :corp 1)
+    (core/gain state :runner :credit 1)
+    (let [bm (get-content state :remote1 0)
+          hok (get-content state :remote1 1)]
+      (core/rez state :corp bm)
+      (run-empty-server state "Server 1")
+      ;; runner now chooses which to access.
+      (prompt-select :runner bm)
+      (prompt-choice :runner "Yes") ; pay to trash
+      (prompt-select :runner hok)
+      ;; should now have prompt to pay 2 net for HoK
+      (prompt-choice :runner "Yes")
+      (is (= 2 (count (:discard (get-runner)))) "Runner took 2 net")
+      (is (= 1 (count (:scored (get-runner)))) "1 scored agenda"))))
+
+(deftest ben-musashi-obokata
+  ;; Check runner chooses order of payment
+  (do-game
+    (new-game (default-corp [(qty "Ben Musashi" 1) (qty "Obokata Protocol" 1)])
+              (default-runner [(qty "Sure Gamble" 6)]))
+    (play-from-hand state :corp "Ben Musashi" "New remote")
+    (play-from-hand state :corp "Obokata Protocol" "Server 1")
+    (take-credits state :corp)
+    (let [bm (get-content state :remote1 0)
+          op (get-content state :remote1 1)]
+      (core/rez state :corp bm)
+      (run-empty-server state "Server 1")
+      ;; runner now chooses which to access.
+      (prompt-select :runner op)
+      ;; prompt should be asking for the net damage costs
+      (is (= "Obokata Protocol" (:title (:card (first (:prompt (get-runner))))))
+          "Prompt to pay steal costs")
+      (prompt-choice :runner "2 net damage")
+      (is (= 2 (count (:discard (get-runner)))) "Runner took 2 net damage")
+      (is (= 0 (count (:scored (get-runner)))) "No scored agendas")
+      (prompt-choice :runner "4 net damage")
+      (is (= 5 (count (:discard (get-runner)))) "Runner took 4 net damage")
+      (is (= 1 (count (:scored (get-runner)))) "Scored agenda"))))
+
+(deftest ben-musashi-fetal-ai
+  ;; Check Fetal AI can be stolen #2586
+  (do-game
+    (new-game (default-corp [(qty "Ben Musashi" 1) (qty "Fetal AI" 1)])
+              (default-runner [(qty "Sure Gamble" 5)]))
+    (play-from-hand state :corp "Ben Musashi" "New remote")
+    (play-from-hand state :corp "Fetal AI" "Server 1")
+    (take-credits state :corp)
+    (let [bm (get-content state :remote1 0)
+          fai (get-content state :remote1 1)]
+      (core/rez state :corp bm)
+      (run-empty-server state "Server 1")
+      ;; runner now chooses which to access.
+      (prompt-select :runner fai)
+      (prompt-choice :runner "Access")
+      ;; prompt should be asking for the net damage costs
+      (is (= "Fetal AI" (:title (:card (first (:prompt (get-runner))))))
+          "Prompt to pay steal costs")
+      (prompt-choice :runner "2 [Credits]")
+      (is (= 3 (:credit (get-runner))) "Runner paid 2 credits")
+      (is (= 0 (count (:scored (get-runner)))) "No scored agendas")
+      (prompt-choice :runner "2 net damage")
+      (is (= 4 (count (:discard (get-runner)))) "Runner took 4 net damage - 2 from Fetal, 2 from Ben")
+      (is (= 1 (count (:scored (get-runner)))) "Scored agenda"))))
+
 (deftest bernice-mai
   ;; Bernice Mai - successful and unsuccessful
   (do-game
@@ -199,7 +298,8 @@
     (play-from-hand state :runner "Temüjin Contract")
     (prompt-choice :runner "HQ")
     (run-empty-server state "HQ")
-    (is (= 2 (:credit (get-runner))) "No Desperado or Temujin credits")))
+    (is (= 2 (:credit (get-runner))) "No Desperado or Temujin credits")
+    (is (not (:successful-run (:register (get-runner)))) "No successful run in register")))
 
 (deftest cyberdex-virus-suite-purge
   ;; Cyberdex Virus Suite - Purge ability
@@ -318,7 +418,42 @@
         (is (= 2 (count (:discard (get-runner)))) "Runner took 1 net damage")
         (run-on state "HQ")
         (run-jack-out state)
-        (is (= 2 (count (:discard (get-runner)))) "Runner did not take  damage")))))
+        (is (= 2 (count (:discard (get-runner)))) "Runner did not take damage")))))
+
+(deftest helheim-servers
+  ;; Helheim Servers - Full test
+  (do-game
+    (new-game (default-corp [(qty "Helheim Servers" 1) (qty "Gutenberg" 1) (qty "Vanilla" 1)
+                             (qty "Jackson Howard" 1) (qty "Hedge Fund" 1)])
+              (default-runner))
+    (play-from-hand state :corp "Helheim Servers" "R&D")
+    (play-from-hand state :corp "Gutenberg" "R&D")
+    (play-from-hand state :corp "Vanilla" "R&D")
+    (take-credits state :corp)
+    (run-on state "R&D")
+    (is (:run @state))
+    (let [helheim (get-content state :rd 0)
+          gutenberg (get-ice state :rd 0)
+          vanilla (get-ice state :rd 1)]
+      (core/rez state :corp helheim)
+      (core/rez state :corp gutenberg)
+      (core/rez state :corp vanilla)
+      (is (= 6 (:current-strength (refresh gutenberg))))
+      (is (= 0 (:current-strength (refresh vanilla))))
+      (card-ability state :corp helheim 0)
+      (prompt-select :corp (find-card "Jackson Howard" (:hand (get-corp))))
+      (is (= 1 (count (:discard (get-corp)))))
+      (is (= 8 (:current-strength (refresh gutenberg))))
+      (is (= 2 (:current-strength (refresh vanilla))))
+      (card-ability state :corp helheim 0)
+      (prompt-select :corp (find-card "Hedge Fund" (:hand (get-corp))))
+      (is (= 2 (count (:discard (get-corp)))))
+      (is (= 10 (:current-strength (refresh gutenberg))))
+      (is (= 4 (:current-strength (refresh vanilla))))
+      (run-jack-out state)
+      (is (not (:run @state)))
+      (is (= 6 (:current-strength (refresh gutenberg))))
+      (is (= 0 (:current-strength (refresh vanilla)))))))
 
 (deftest hokusai-grid
   ;; Hokusai Grid - Do 1 net damage when run successful on its server
@@ -352,6 +487,35 @@
       (is (= 1 (:tag (get-runner))) "1 tag removed")
       (is (= 1 (count (:discard (get-corp)))) "Keegan trashed")
       (is (= 1 (count (:discard (get-runner)))) "Corroder trashed"))))
+
+(deftest manta-grid
+  ;; If the Runner has fewer than 6 or no unspent clicks on successful run, corp gains a click next turn.
+  (do-game
+    (new-game (default-corp [(qty "Manta Grid" 1)])
+              (default-runner))
+    (starting-hand state :runner [])
+    (is (= 3 (:click (get-corp))) "Corp has 3 clicks")
+    (play-from-hand state :corp "Manta Grid" "HQ")
+    (core/rez state :corp (get-content state :hq 0))
+    (take-credits state :corp)
+    (core/click-draw state :runner nil)
+    (core/click-draw state :runner nil)
+    (run-empty-server state "HQ")
+    (prompt-choice :runner "No") ; don't trash Manta Grid
+    (is (= 1 (:click (get-runner))) "Running last click")
+    (run-empty-server state "HQ")
+    (prompt-choice :runner "No") ; don't trash Manta Grid
+    (take-credits state :runner)
+    (is (= 5 (:click (get-corp))) "Corp gained 2 clicks due to 2 runs with < 6 Runner credits")
+    (take-credits state :corp)
+    (take-credits state :runner)
+    (is (= 3 (:click (get-corp))) "Corp back to 3 clicks")
+    (take-credits state :corp)
+    (take-credits state :runner 3)
+    (run-empty-server state "HQ")
+    (prompt-choice :runner "No") ; don't trash Manta Grid
+    (take-credits state :runner)
+    (is (= 4 (:click (get-corp))) "Corp gained a click due to running last click")))
 
 (deftest marcus-batty-security-nexus
   ;; Marcus Batty - Simultaneous Interaction with Security Nexus
@@ -494,14 +658,14 @@
       (prompt-select :runner hok)
       ;; prompt shows "You cannot steal"
       (prompt-choice :runner "OK")
-      (is (= 0 (count (:scored (get-runner)))) "No scored agendas")
+      (is (= 0 (count (:scored (get-runner)))) "No stolen agendas")
       (prompt-select :runner ohg)
       (prompt-choice :runner "No")
       (core/steal state :runner (find-card "House of Knives" (:hand (get-corp))))
       (run-empty-server state "Server 1")
       (prompt-select :runner hok)
       (prompt-choice :runner "Yes")
-      (is (= 2 (count (:scored (get-runner)))) "2 scored agendas"))))
+      (is (= 2 (count (:scored (get-runner)))) "2 stolen agendas"))))
 
 (deftest old-hollywood-grid-central
   ;; Old Hollywood Grid - Central server
@@ -518,7 +682,31 @@
       (prompt-choice :runner "Card from hand")
       ;; prompt shows "You cannot steal"
       (prompt-choice :runner "OK")
-      (is (= 0 (count (:scored (get-runner)))) "No scored agendas"))))
+      (is (= 0 (count (:scored (get-runner)))) "No stolen agendas")
+      (prompt-choice :runner "Old Hollywood Grid")
+      ;; trash OHG
+      (prompt-choice :runner "Yes")
+      (run-empty-server state "HQ")
+      (prompt-choice :runner "Steal")
+      (is (= 1 (count (:scored (get-runner)))) "1 stolen agenda"))))
+
+(deftest old-hollywood-grid-gang-sign
+  ;; Old Hollywood Grid - Gang Sign interaction. Prevent the steal outside of a run. #2169
+  (do-game
+    (new-game (default-corp [(qty "Old Hollywood Grid" 1) (qty "Project Beale" 2)])
+              (default-runner [(qty "Gang Sign" 1)]))
+    (play-from-hand state :corp "Old Hollywood Grid" "HQ")
+    (play-from-hand state :corp "Project Beale" "New remote")
+    (take-credits state :corp)
+    (play-from-hand state :runner "Gang Sign")
+    (take-credits state :runner)
+    (core/rez state :corp (get-content state :hq 0))
+    (score-agenda state :corp (get-content state :remote1 0))
+    ;; Gang sign fires
+    (prompt-choice :runner "Card from hand")
+    ;; prompt shows "You cannot steal"
+    (prompt-choice :runner "OK")
+    (is (= 0 (count (:scored (get-runner)))) "No stolen agendas")))
 
 (deftest port-anson-grid
   ;; Port Anson Grid - Prevent the Runner from jacking out until they trash a program
@@ -776,6 +964,29 @@
       (is (= 1 (:current-strength (refresh iw2))) "Satellite Grid not impacting ICE elsewhere")
       (core/derez state :corp sg)
       (is (= 2 (:current-strength (refresh iw1))) "Ice Wall strength boost only from real advancement"))))
+
+(deftest signal-jamming
+  ;; Trash to stop installs for the rest of the run
+  (do-game
+    (new-game (default-corp [(qty "Signal Jamming" 3)])
+              (default-runner [(qty "Self-modifying Code" 3) (qty "Reaver" 1)]))
+    (starting-hand state :runner ["Self-modifying Code" "Self-modifying Code"])
+    (play-from-hand state :corp "Signal Jamming" "HQ")
+    (take-credits state :corp)
+    (play-from-hand state :runner "Self-modifying Code")
+    (play-from-hand state :runner "Self-modifying Code")
+    (let [smc1 (get-in @state [:runner :rig :program 0])
+          smc2 (get-in @state [:runner :rig :program 1])
+          sj (get-content state :hq 0)]
+      (core/rez state :corp sj)
+      (run-on state "HQ")
+      (run-continue state)
+      (card-ability state :corp sj 0)
+      (card-ability state :runner smc1 0)
+      (is (empty? (:prompt (get-runner))) "SJ blocking SMC")
+      (run-jack-out state)
+      (card-ability state :runner smc2 0)
+      (prompt-card :runner (find-card "Reaver" (:deck (get-runner)))))))
 
 (deftest strongbox
   ;; Strongbox - Ability

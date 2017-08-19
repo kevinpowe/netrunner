@@ -5,13 +5,40 @@
 
 (def game-states (atom {}))
 
+(defn- card-implemented [card]
+  "Checks if the card is implemented. Looks for a valid return from `card-def`.
+  If implemented also looks for `:implementation` key which may contain special notes.
+  Returns either:
+    nil - not implemented
+    :full - implemented fully
+    msg - string with implementation notes"
+  (when-let [cdef (card-def card)]
+    ;; Card is defined - hence implemented
+    (if-let [impl (:implementation cdef)]
+      (if (:recurring cdef) (str impl ". Recurring credits usage not restricted") impl)
+      (if (:recurring cdef) "Recurring credits usage not restricted" :full))))
+
 ;;; Functions for the creation of games and the progression of turns.
-(defn- identity-init
+(defn init-identity
   "Initialise the identity"
   [state side identity]
   (card-init state side identity)
   (when-let [baselink (:baselink identity)]
     (gain state side :link baselink)))
+
+(defn- init-hands [state]
+  (draw state :corp 5 {:suppress-event true})
+  (draw state :runner 5 {:suppress-event true})
+  (when (and (-> @state :corp :identity :title)
+             (-> @state :runner :identity :title))
+    (show-wait-prompt state :runner "Corp to keep hand or mulligan"))
+  (doseq [side [:corp :runner]]
+    (when (-> @state side :identity :title)
+      (show-prompt state side nil "Keep hand?"
+                   ["Keep" "Mulligan"]
+                   #(if (= % "Keep")
+                      (keep-hand state side nil)
+                      (mulligan state side nil))))))
 
 (defn init-game
   "Initializes a new game with the given players vector."
@@ -21,55 +48,62 @@
         corp-deck (create-deck (:deck corp) (:user corp))
         runner-deck (create-deck (:deck runner) (:user runner))
         corp-identity (assoc (or (get-in corp [:deck :identity]) {:side "Corp" :type "Identity"}) :cid (make-cid))
+        corp-identity (assoc corp-identity :implementation (card-implemented corp-identity))
         runner-identity (assoc (or (get-in runner [:deck :identity]) {:side "Runner" :type "Identity"}) :cid (make-cid))
+        runner-identity (assoc runner-identity :implementation (card-implemented runner-identity))
         state (atom
                 {:gameid gameid :log [] :active-player :runner :end-turn true
                  :rid 0 :turn 0 :eid 0
+                 :sfx [] :sfx-current-id 0
                  :options {:spectatorhands spectatorhands}
                  :corp {:user (:user corp) :identity corp-identity
-                        :deck (zone :deck (drop 5 corp-deck))
-                        :hand (zone :hand (take 5 corp-deck))
+                        :deck (zone :deck corp-deck)
+                        :hand []
                         :discard [] :scored [] :rfg [] :play-area []
                         :servers {:hq {} :rd{} :archives {}}
                         :click 0 :credit 5 :bad-publicity 0 :has-bad-pub 0
+                        :toast []
                         :hand-size-base 5 :hand-size-modification 0
                         :agenda-point 0
                         :click-per-turn 3 :agenda-point-req 7 :keep false}
                  :runner {:user (:user runner) :identity runner-identity
-                          :deck (zone :deck (drop 5 runner-deck))
-                          :hand (zone :hand (take 5 runner-deck))
+                          :deck (zone :deck runner-deck)
+                          :hand []
                           :discard [] :scored [] :rfg [] :play-area []
                           :rig {:program [] :resource [] :hardware []}
+                          :toast []
                           :click 0 :credit 5 :run-credit 0 :memory 4 :link 0 :tag 0
                           :hand-size-base 5 :hand-size-modification 0
                           :agenda-point 0
                           :hq-access 1 :rd-access 1 :tagged 0
                           :brain-damage 0 :click-per-turn 4 :agenda-point-req 7 :keep false}})]
-    (identity-init state :corp corp-identity)
-    (identity-init state :runner runner-identity)
+    (init-identity state :corp corp-identity)
+    (init-identity state :runner runner-identity)
     (swap! game-states assoc gameid state)
-    (trigger-event state :corp :pre-start-game)
-    (trigger-event state :runner :pre-start-game)
-    (when (and (-> @state :corp :identity :title) (-> @state :runner :identity :title))
-      (show-wait-prompt state :runner "Corp to keep hand or mulligan"))
-    (doseq [s [:corp :runner]]
-      (when (-> @state s :identity :title)
-        (show-prompt state s nil "Keep hand?" ["Keep" "Mulligan"]
-                     #(if (= % "Keep") (keep-hand state s nil) (mulligan state s nil)))))
+    (let [side :corp]
+      (when-completed (trigger-event-sync state side :pre-start-game)
+                      (let [side :runner]
+                        (when-completed (trigger-event-sync state side :pre-start-game)
+                                        (init-hands state)))))
     @game-states))
 
 (defn server-card
   ([title] (@all-cards title))
   ([title user]
-   (let [c (@all-cards title)]
-     (or (when (:special user) (@all-cards-alt title)) c))))
+   (@all-cards title)))
 
 (defn make-card
-  "Makes a proper card from an @all-cards card"
-  [card]
+  "Makes or remakes (with current cid) a proper card from an @all-cards card"
+  ([card] (make-card card (make-cid)))
+  ([card cid]
   (-> card
-      (assoc :cid (make-cid))
-      (dissoc :setname :text :_id :influence :number :influencelimit :factioncost)))
+      (assoc :cid cid :implementation (card-implemented card))
+      (dissoc :setname :text :_id :influence :number :influencelimit :factioncost))))
+
+(defn reset-card
+  "Resets a card back to its original state overlaid with any play-state data"
+  ([state side card]
+   (update! state side (merge card (make-card (get @all-cards (:title card)) (:cid card))))))
 
 (defn create-deck
   "Creates a shuffled draw deck (R&D/Stack) from the given list of cards.
@@ -95,13 +129,6 @@
 (defn make-result
   [eid result]
   (assoc eid :result result))
-
-;; Appears to be unused???
-(def reset-value
-  {:corp {:credit 5 :bad-publicity 0
-          :hand-size-base 5 :hand-size-modification 0}
-   :runner {:credit 5 :run-credit 0 :link 0 :memory 4
-            :hand-size-base 5 :hand-size-modification 0}})
 
 (defn mulligan
   "Mulligan starting hand."
@@ -137,10 +164,12 @@
   "End phase 1.2 and trigger appropriate events for the player."
   [state side args]
   (turn-message state side true)
-  (gain state side :click (get-in @state [side :click-per-turn]))
+  (gain state side :click (+ (get-in @state [side :click-per-turn]) (or (get-in @state [side :extra-click-temp]) 0)))
+  (swap! state dissoc-in [side :extra-click-temp])
   (when-completed (trigger-event-sync state side (if (= side :corp) :corp-turn-begins :runner-turn-begins))
                   (do (when (= side :corp)
-                        (draw state side))
+                        (draw state side)
+                        (trigger-event state side :corp-mandatory-draw))
                       (swap! state dissoc (if (= side :corp) :corp-phase-12 :runner-phase-12))
                       (when (= side :corp)
                         (update-all-advancement-costs state side)))))
@@ -193,5 +222,13 @@
       (swap! state assoc :end-turn true)
       (swap! state update-in [side :register] dissoc :cannot-draw)
       (swap! state update-in [side :register] dissoc :drawn-this-turn)
+      (doseq [c (filter #(= :this-turn (:rezzed %)) (all-installed state :corp))]
+        (update! state side (assoc c :rezzed true)))
       (clear-turn-register! state)
-      (swap! state dissoc :turn-events))))
+      (swap! state dissoc :turn-events)
+      (when-let [extra-turns (get-in @state [side :extra-turns])]
+        (when (> extra-turns 0)
+          (start-turn state side nil)
+          (swap! state update-in [side :extra-turns] dec)
+          (let [turns (if (= 1 extra-turns) "turn" "turns")]
+            (system-msg state side (clojure.string/join ["will have " extra-turns " extra " turns " remaining."]))))))))

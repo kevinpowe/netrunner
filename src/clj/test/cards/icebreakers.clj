@@ -31,6 +31,31 @@
       (is (= 2 (get-counters atman :power)) "2 power counters")
       (is (= 2 (:current-strength atman)) "2 current strength"))))
 
+(deftest baba-yaga
+  (do-game
+    (new-game
+      (default-corp)
+      (default-runner [(qty "Baba Yaga" 1) (qty "Faerie" 1) (qty "Yog.0" 1)(qty "Sharpshooter" 1)]))
+    (take-credits state :corp)
+    (core/gain state :runner :credit 10)
+    (play-from-hand state :runner "Baba Yaga")
+    (play-from-hand state :runner "Sharpshooter")
+    (let [baba (get-program state 0)
+          base-abicount (count (:abilities baba))]
+      (card-ability state :runner baba 0)
+      (prompt-select :runner (find-card "Faerie" (:hand (get-runner))))
+      (is (= (+ 2 base-abicount) (count (:abilities (refresh baba)))) "Baba Yaga gained 2 subroutines from Faerie")
+      (card-ability state :runner (refresh baba) 0)
+      (prompt-select :runner (find-card "Yog.0" (:hand (get-runner))))
+      (is (= (+ 3 base-abicount) (count (:abilities (refresh baba)))) "Baba Yaga gained 1 subroutine from Yog.0")
+      (core/trash state :runner (first (:hosted (refresh baba))))
+      (is (= (inc base-abicount) (count (:abilities (refresh baba)))) "Baba Yaga lost 2 subroutines from trashed Faerie")
+      (card-ability state :runner baba 1)
+      (prompt-select :runner (find-card "Sharpshooter" (:program (:rig (get-runner)))))
+      (is (= 2 (count (:hosted (refresh baba)))) "Faerie and Sharpshooter hosted on Baba Yaga")
+      (is (= 1 (:memory (get-runner))) "1 MU left with 2 breakers on Baba Yaga")
+      (is (= 4 (:credit (get-runner))) "-5 from Baba, -1 from Sharpshooter played into Rig, -5 from Yog"))))
+
 (deftest chameleon-clonechip
   ;; Chameleon - Install on corp turn, only returns to hand at end of runner's turn
   (do-game
@@ -98,11 +123,11 @@
   ;; Crypsis - Loses a virus counter after encountering ice it broke
   (do-game
     (new-game (default-corp [(qty "Ice Wall" 1)])
-              (default-runner [(qty "Crypsis" 1)]))
+              (default-runner [(qty "Crypsis" 2)]))
     (play-from-hand state :corp "Ice Wall" "Archives")
     (take-credits state :corp)
+    (core/gain state :runner :credit 100)
     (play-from-hand state :runner "Crypsis")
-    (core/gain state :runner :credit 8)
     (let [crypsis (get-in @state [:runner :rig :program 0])]
       (card-ability state :runner crypsis 2)
       (is (= 1 (get-in (refresh crypsis) [:counter :virus]))
@@ -110,7 +135,6 @@
 
       (run-on state "Archives")
       (core/rez state :corp (get-ice state :archives 0))
-      (core/gain state :runner :credit 4)
       (card-ability state :runner (refresh crypsis) 0) ; Match strength
       (card-ability state :runner (refresh crypsis) 1) ; Break
       (is (= 1 (get-in (refresh crypsis) [:counter :virus]))
@@ -123,11 +147,24 @@
           "Crypsis has 0 virus counters")
 
       (run-on state "Archives")
-      (core/gain state :runner :credit 4)
       (card-ability state :runner (refresh crypsis) 0) ; Match strength
       (card-ability state :runner (refresh crypsis) 1) ; Break
       (is (= 0 (get-in (refresh crypsis) [:counter :virus]))
           "Crypsis has 0 virus counters")
+      (run-jack-out state)
+      (is (= "Crypsis" (:title (first (:discard (get-runner)))))
+          "Crypsis was trashed"))
+
+    (take-credits state :runner)
+    (take-credits state :corp)
+
+    (play-from-hand state :runner "Crypsis")
+    (let [crypsis (get-in @state [:runner :rig :program 0])]
+      (run-on state "Archives")
+      (card-ability state :runner (refresh crypsis) 0) ; Match strength
+      (card-ability state :runner (refresh crypsis) 1) ; Break
+      (is (nil? (get-in (refresh crypsis) [:counter :virus]))
+          "Crypsis has nil virus counters")
       (run-jack-out state)
       (is (= "Crypsis" (:title (first (:discard (get-runner)))))
           "Crypsis was trashed"))))
@@ -173,6 +210,23 @@
       (prompt-choice :runner "Yes")
       (is (= 3 (count (:hand (get-runner)))) "Deus X prevented net damage from accessing Fetal AI, but not from Personal Evolution")
       (is (= 1 (count (:scored (get-runner)))) "Fetal AI stolen"))))
+
+(deftest faerie-auto-trash
+  ;; Faerie - trash after encounter is over, not before.
+  (do-game
+    (new-game
+      (default-corp [(qty "Caduceus" 1)])
+      (default-runner [(qty "Faerie" 1)]))
+    (play-from-hand state :corp "Caduceus" "Archives")
+    (take-credits state :corp)
+    (play-from-hand state :runner "Faerie")
+    (let [fae (get-program state 0)]
+      (run-on state :archives)
+      (core/rez state :corp (get-ice state :archives 0))
+      (card-ability state :runner fae 0)
+      (is (refresh fae) "Faerie not trashed until encounter over")
+      (run-continue state)
+      (is (find-card "Faerie" (:discard (get-runner))) "Faerie trashed"))))
 
 (deftest faust-pump
   ;; Faust - Pump by discarding
@@ -234,6 +288,48 @@
     (core/trash state :corp iw)
     (is (not (:icon (refresh iw))) "Ice Wall does not have an icon after itself trashed"))))
 
+(deftest nanotk-install-ice-during-run
+  ;; Na'Not'K - Strength adjusts accordingly when ice installed during run
+  (do-game
+    (new-game (default-corp [(qty "Architect" 1) (qty "Eli 1.0" 1)])
+              (default-runner [(qty "Na'Not'K" 1)]))
+    (play-from-hand state :corp "Architect" "HQ")
+    (take-credits state :corp)
+    (play-from-hand state :runner "Na'Not'K")
+    (let [nanotk (get-program state 0)
+          architect (get-ice state :hq 0)]
+      (is (= 1 (:current-strength (refresh nanotk))) "Default strength")
+      (run-on state "HQ")
+      (core/rez state :corp architect)
+      (is (= 2 (:current-strength (refresh nanotk))) "1 ice on HQ")
+      (card-subroutine state :corp (refresh architect) 1)
+      (prompt-select :corp (find-card "Eli 1.0" (:hand (get-corp))))
+      (prompt-choice :corp "HQ")
+      (is (= 3 (:current-strength (refresh nanotk))) "2 ice on HQ")
+      (run-jack-out state)
+      (is (= 1 (:current-strength (refresh nanotk))) "Back to default strength"))))
+
+(deftest nanotk-redirect
+  ;; Na'Not'K - Strength adjusts accordingly when run redirected to another server
+  (do-game
+    (new-game (default-corp [(qty "Susanoo-no-Mikoto" 1) (qty "Crick" 1) (qty "Cortex Lock" 1)])
+              (default-runner [(qty "Na'Not'K" 1)]))
+    (play-from-hand state :corp "Cortex Lock" "HQ")
+    (play-from-hand state :corp "Susanoo-no-Mikoto" "HQ")
+    (play-from-hand state :corp "Crick" "Archives")
+    (take-credits state :corp)
+    (play-from-hand state :runner "Na'Not'K")
+    (let [nanotk (get-program state 0)
+          susanoo (get-ice state :hq 1)]
+      (is (= 1 (:current-strength (refresh nanotk))) "Default strength")
+      (run-on state "HQ")
+      (core/rez state :corp susanoo)
+      (is (= 3 (:current-strength (refresh nanotk))) "2 ice on HQ")
+      (card-subroutine state :corp (refresh susanoo) 0)
+      (is (= 2 (:current-strength (refresh nanotk))) "1 ice on Archives")
+      (run-jack-out state)
+      (is (= 1 (:current-strength (refresh nanotk))) "Back to default strength"))))
+
 (deftest overmind-counters
   ;; Overmind - Start with counters equal to unused MU
   (do-game
@@ -248,6 +344,50 @@
     (is (= 5 (:memory (get-runner))))
     (let [ov (get-in @state [:runner :rig :program 0])]
       (is (= 5 (get-counters (refresh ov) :power)) "Overmind has 5 counters"))))
+
+(deftest paperclip
+  ;; Paperclip - prompt to install on encounter, but not if another is installed
+  (do-game
+    (new-game (default-corp [(qty "Vanilla" 1)])
+              (default-runner [(qty "Paperclip" 2)]))
+    (play-from-hand state :corp "Vanilla" "Archives")
+    (take-credits state :corp)
+    (trash-from-hand state :runner "Paperclip")
+    (run-on state "Archives")
+    (core/rez state :corp (get-ice state :archives 0))
+    (prompt-choice :runner "Yes") ; install paperclip
+    (run-continue state)
+    (run-successful state)
+    (is (not (:run @state)) "Run ended")
+    (trash-from-hand state :runner "Paperclip")
+    (run-on state "Archives")
+    (is (empty? (:prompt (get-runner))) "No prompt to install second Paperclip")))
+
+(deftest paperclip-multiple
+  ;; Paperclip - do not show a second install prompt if user said No to first, when multiple are in heap
+  (do-game
+    (new-game (default-corp [(qty "Vanilla" 2)])
+              (default-runner [(qty "Paperclip" 3)]))
+    (play-from-hand state :corp "Vanilla" "Archives")
+    (play-from-hand state :corp "Vanilla" "Archives")
+    (take-credits state :corp)
+    (trash-from-hand state :runner "Paperclip")
+    (trash-from-hand state :runner "Paperclip")
+    (trash-from-hand state :runner "Paperclip")
+    (run-on state "Archives")
+    (core/rez state :corp (get-ice state :archives 1))
+    (prompt-choice :runner "No")
+    (is (empty? (:prompt (get-runner))) "No additional prompts to rez other copies of Paperclip")
+    (run-continue state)
+    ;; we should get the prompt on a second ice even after denying the first.
+    (core/rez state :corp (get-ice state :archives 0))
+    (prompt-choice :runner "No")
+    (is (empty? (:prompt (get-runner))) "No additional prompts to rez other copies of Paperclip")
+    (core/jack-out state :runner)
+    ;; Run again, make sure we get the prompt to install again.
+    (run-on state "Archives")
+    (prompt-choice :runner "No")
+    (is (empty? (:prompt (get-runner))) "No additional prompts to rez other copies of Paperclip")))
 
 (deftest shiv
   ;; Shiv - Gain 1 strength for each installed breaker; no MU cost when 2+ link

@@ -1,5 +1,5 @@
 (in-ns 'game.core)
-(declare corp-trace-prompt optional-ability
+(declare any-flag-fn? corp-trace-prompt optional-ability
          check-optional check-psi check-trace complete-ability
          do-choices do-ability
          psi-game resolve-ability-eid resolve-psi resolve-trace show-select)
@@ -188,8 +188,11 @@
        (show-select state s card ability args)
        ;; a :number prompt
        (:number choices)
-       (let [n ((:number choices) state side eid card targets)]
-         (prompt! state s card prompt {:number n} ab args))
+       (let [n ((:number choices) state side eid card targets)
+             d (if-let [dfunc (:default choices)]
+                 (dfunc state side (make-eid state) card targets)
+                 0)]
+         (prompt! state s card prompt {:number n :default d} ab args))
        (:card-title choices)
        (prompt!
          state s card prompt
@@ -219,7 +222,7 @@
              (or (not advance-counter-cost)
                  (<= advance-counter-cost (or advance-counter 0))))
     ;; Ensure that any costs can be paid.
-    (when-let [cost-str (apply pay (concat [state side card] cost))]
+    (when-let [cost-str (apply pay (concat [state side card] cost [{:action (:cid card)}]))]
       (let [c (if counter-cost
                 (update-in card [:counter (first counter-cost)]
                            #(- (or % 0) (or (second counter-cost) 0)))
@@ -346,20 +349,27 @@
    ;; that can be selected.
    (letfn [(wrap-function [args kw]
              (let [f (kw args)] (if f (assoc args kw #(f state side (:eid ability) card [%])) args)))]
-     (let [ability (update-in ability [:choices :max] #(if (fn? %) (% state side (make-eid state) card nil) %))]
-     (swap! state update-in [side :selected]
-            #(conj (vec %) {:ability (dissoc ability :choices) :req (get-in ability [:choices :req])
-                            :max (get-in ability [:choices :max])}))
-     (show-prompt state side card
-                  (if-let [msg (:prompt ability)]
-                    msg
-                    (if-let [m (get-in ability [:choices :max])]
-                      (str "Select up to " m " targets for " (:title card))
-                      (str "Select a target for " (:title card))))
-                  ["Done"] (fn [choice] (resolve-select state side))
-                  (-> args
-                      (assoc :prompt-type :select :show-discard (:show-discard ability))
-                      (wrap-function :cancel-effect)))))))
+     (let [ability (update-in ability [:choices :max] #(if (fn? %) (% state side (make-eid state) card nil) %))
+           all (get-in ability [:choices :all])]
+       (swap! state update-in [side :selected]
+              #(conj (vec %) {:ability (dissoc ability :choices) :req (get-in ability [:choices :req])
+                              :max (get-in ability [:choices :max])
+                              :all all}))
+       (show-prompt state side card
+                    (if-let [msg (:prompt ability)]
+                      msg
+                      (if-let [m (get-in ability [:choices :max])]
+                        (str "Select up to " m " targets for " (:title card))
+                        (str "Select a target for " (:title card))))
+                    (if all ["Hide"] ["Done"])
+                    (if all
+                      (fn [choice]
+                        (toast state side (str "You must choose " (get-in ability [:choices :max])))
+                        (show-select state side card ability args))
+                      (fn [choice] (resolve-select state side)))
+                    (-> args
+                        (assoc :prompt-type :select :show-discard (:show-discard ability))
+                        (wrap-function :cancel-effect)))))))
 
 (defn resolve-select
   "Resolves a selection prompt by invoking the prompt's ability with the targeted cards.
@@ -402,11 +412,16 @@
   ([state side eid card psi]
    (swap! state assoc :psi {})
    (register-once state psi card)
+   (system-msg state :corp (str "uses " (:title card) " to start a psi game"))
    (doseq [s [:corp :runner]]
-     (show-prompt state s card (str "Choose an amount to spend for " (:title card))
-                  (map #(str % " [Credits]") (range (min 3 (inc (get-in @state [s :credit])))))
-                  #(resolve-psi state s eid card psi (Integer/parseInt (first (split % #" "))))
-                  {:priority 2}))))
+     (let [all-amounts (range (min 3 (inc (get-in @state [s :credit]))))
+           valid-amounts (remove #(or (any-flag-fn? state :corp :psi-prevent-spend %)
+                                      (any-flag-fn? state :runner :psi-prevent-spend %))
+                                 all-amounts)]
+       (show-prompt state s card (str "Choose an amount to spend for " (:title card))
+                    (map #(str % " [Credits]") valid-amounts)
+                    #(resolve-psi state s eid card psi (Integer/parseInt (first (split % #" "))))
+                    {:priority 2})))))
 
 (defn resolve-psi
   "Resolves a psi game by charging credits to both sides and invoking the appropriate
@@ -416,16 +431,17 @@
   (let [opponent (if (= side :corp) :runner :corp)]
     (if-let [opponent-bet (get-in @state [:psi opponent])]
       (do (clear-wait-prompt state opponent)
-          (gain state opponent :credit (- opponent-bet))
+          (deduce state opponent [:credit opponent-bet])
           (system-msg state opponent (str "spends " opponent-bet " [Credits]"))
-          (gain state side :credit (- bet))
+          (deduce state side [:credit bet])
           (system-msg state side (str "spends " bet " [Credits]"))
           (trigger-event state side (keyword (str "psi-bet-" (name side))) bet)
           (trigger-event state side (keyword (str "psi-bet-" (name opponent))) opponent-bet)
-          (trigger-event state side :psi-game nil)
-          (if-let [ability (if (= bet opponent-bet) (:equal psi) (:not-equal psi))]
-            (resolve-ability state (:side card) (assoc ability :eid eid :delayed-completion true) card nil)
-            (effect-completed state side eid card)))
+          (when-completed (trigger-event-sync state side :psi-game bet opponent-bet)
+                          (if-let [ability (if (= bet opponent-bet) (:equal psi) (:not-equal psi))]
+                            (resolve-ability state (:side card) (assoc ability :eid eid :delayed-completion true) card nil)
+                            (effect-completed state side eid card)))
+          (trigger-event state side :psi-game-done bet opponent-bet))
       (show-wait-prompt
         state side (str (clojure.string/capitalize (name opponent)) " to choose psi game credits")))))
 
@@ -458,15 +474,15 @@
         {:keys [strength ability card]} (:trace @state)]
     (system-msg state :runner (str " spends " boost " [Credits] to increase link strength to "
                                    (+ (:link runner) boost)))
-    (let [succesful (> strength (+ (:link runner) boost))
-          which-ability (assoc (if succesful ability (:unsuccessful ability)) :eid (make-eid state))]
-      (when-completed (resolve-ability state :corp (:eid which-ability) which-ability
-                                       card [strength (+ (:link runner) boost)])
-                      (do (trigger-event state :corp (if succesful :successful-trace :unsuccessful-trace))
-                          (when-let [kicker (:kicker ability)]
-                            (when (>= strength (:min kicker))
-                              (resolve-ability state :corp kicker card [strength (+ (:link runner) boost)])))
-                          (effect-completed state side eid nil))))))
+    (let [successful (> strength (+ (:link runner) boost))
+          which-ability (assoc (if successful ability (:unsuccessful ability)) :eid (make-eid state))]
+      (when-completed (trigger-event-sync state :corp (if successful :successful-trace :unsuccessful-trace) {:runner-spent boost})
+                      (when-completed (resolve-ability state :corp (:eid which-ability) which-ability
+                                                                   card [strength (+ (:link runner) boost)])
+                                      (do (when-let [kicker (:kicker ability)]
+                                            (when (>= strength (:min kicker))
+                                              (resolve-ability state :corp kicker card [strength (+ (:link runner) boost)])))
+                                          (effect-completed state side eid nil)))))))
 
 (defn corp-trace-prompt
   "Starts the trace process by showing the boost prompt to the corp."
@@ -480,7 +496,8 @@
   (resolve-ability state side
                    {:show-discard true
                     :choices {:max n
-                              :req #(and (:side % "Corp") (= (:zone %) [:discard]))}
+                              :req #(and (= (:side %) "Corp")
+                                         (= (:zone %) [:discard]))}
                     :msg (msg "shuffle "
                               (let [seen (filter :seen targets)
                                     m (count (filter #(not (:seen %)) targets))]
@@ -490,5 +507,6 @@
                                             (when (> m 1) "s")))))
                               " into R&D")
                     :effect (req (doseq [c targets] (move state side c :deck))
-                                 (shuffle! state side :deck))}
+                                 (shuffle! state side :deck))
+                    :cancel-effect (req (shuffle! state side :deck))}
                    card nil))

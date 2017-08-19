@@ -13,7 +13,7 @@ mongoHost = process.env.OPENSHIFT_MONGODB_DB_HOST || '127.0.0.1'
 mongoPort = process.env.OPENSHIFT_MONGODB_DB_PORT || '27017'
 appName = process.env.OPENSHIFT_APP_NAME || 'netrunner'
 
-db = mongoskin.db("mongodb://#{login}#{mongoHost}:#{mongoPort}/#{appName}")
+db = mongoskin.db("mongodb://#{login}#{mongoHost}:#{mongoPort}/#{appName}").open( (err, _) -> throw err if err )
 
 same = (key, t) ->
   return [key, t]
@@ -28,6 +28,7 @@ setFields = {
   "name" : same
   "date_release" : (k, t) -> ["available", if t is null then "4096-01-01" else t]
   "cycle_code" : (k, t) -> ["cycle", capitalize(t.replace(/-/g, " "))]
+  "size" : (k, t) -> ["bigbox", t > 20]
 }
 
 mwlFields = {
@@ -75,7 +76,8 @@ cardFields = {
   "memory_cost" : rename("memoryunits"),
   "strength" : same,
   "trash_cost" : rename("trash"),
-  "deck_limit" : rename("limited")
+  "deck_limit" : rename("limited"),
+  "quantity" : rename("packquantity")
 }
 
 baseurl = "http://netrunnerdb.com/api/2.0/public/"
@@ -95,10 +97,10 @@ fetchSets = (callback) ->
         mapSets[set.code] = set.name
       sets = selectFields(setFields, data)
       db.collection("sets").remove ->
-      db.collection("sets").insert sets, (err, result) ->
-        fs.writeFile "andb-sets.json", JSON.stringify(sets), ->
-          console.log("#{sets.length} sets fetched")
-        callback(null, sets.length)
+        db.collection("sets").insert sets, (err, result) ->
+          fs.writeFile "andb-sets.json", JSON.stringify(sets), ->
+            console.log("#{sets.length} sets fetched")
+          callback(null, sets.length)
 
 fetchImg = (urlPath, code, imgPath, t) ->
   setTimeout ->
@@ -123,10 +125,10 @@ fetchCards = (callback) ->
           fetchImg(res.imageUrlTemplate, card.code, imgPath, i++ * 200)
 
       db.collection("cards").remove ->
-      db.collection("cards").insert cards, (err, result) ->
-        fs.writeFile "andb-cards.json", JSON.stringify(cards), ->
-          console.log("#{cards.length} cards fetched")
-        callback(null, cards.length)
+        db.collection("cards").insert cards, (err, result) ->
+          fs.writeFile "andb-cards.json", JSON.stringify(cards), ->
+            console.log("#{cards.length} cards fetched")
+          callback(null, cards.length)
 
 fetchMWL = (callback) ->
   request.get baseurl + "mwl", (error, response, body) ->
@@ -134,9 +136,9 @@ fetchMWL = (callback) ->
       data = JSON.parse(body).data
       mwl = selectFields(mwlFields, data)
       db.collection("mwl").remove ->
-      db.collection("mwl").insert mwl, (err, result) ->
-        fs.writeFile "andb-mwl.json", JSON.stringify(mwl), ->
-          console.log("#{mwl.length} MWL lists fetched")
-        callback(null, mwl.length)
+        db.collection("mwl").insert mwl, (err, result) ->
+          fs.writeFile "andb-mwl.json", JSON.stringify(mwl), ->
+            console.log("#{mwl.length} MWL lists fetched")
+          callback(null, mwl.length)
 
 async.series [fetchSets, fetchCards, fetchMWL, () -> db.close()]

@@ -57,14 +57,20 @@
           (let [[card & remaining] unchecked]
             (recur (filter identity (into remaining (:hosted card))) (into installed [card]))))))))
 
+(defn get-all-installed
+  "Returns a list of all installed cards"
+  [state]
+  (concat (all-installed state :corp) (all-installed state :runner)))
+
 (defn all-active
   "Returns a vector of all active cards for the given side. Active cards are either installed, the identity,
-  or the corp's scored area."
+  currents, or the corp's scored area."
   [state side]
   (if (= side :runner)
-    (cons (get-in @state [:runner :identity]) (all-installed state side))
+    (cons (get-in @state [:runner :identity]) (concat (get-in @state [:runner :current]) (all-installed state side)))
     (cons (get-in @state [:corp :identity]) (filter #(not (:disabled %))
                                                     (concat (all-installed state side)
+                                                            (get-in @state [:corp :current])
                                                             (get-in @state [:corp :scored]))))))
 
 (defn installed-byname
@@ -130,7 +136,7 @@
 
 (defn remove-icon
   "Remove the icon associated with the card and target."
-  ([state side card] (remove-icon state side card (get-card state (:icon-target card))))
+  ([state side card] (remove-icon state side card (find-cid (-> card :icon-target :cid) (get-all-installed state))))
   ([state side card target]
    (set-prop state side target :icon nil)
    (set-prop state side card :icon-target nil)))
